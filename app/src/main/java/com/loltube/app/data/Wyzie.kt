@@ -69,7 +69,14 @@ object LoLTubeDir {
         return d
     }
 
-    fun subsDir(): java.io.File = java.io.File(root(), "subs").apply { mkdirs() }
+    fun subsDir(): java.io.File = java.io.File(root(), "subs").apply {
+        mkdirs()
+        // keep the cache bounded: drop oldest files beyond 24
+        val files = listFiles()?.sortedBy { it.lastModified() } ?: return@apply
+        if (files.size > 24) {
+            files.take(files.size - 24).forEach { it.delete() }
+        }
+    }
 
     fun clearSubs() {
         subsDir().listFiles()?.forEach { it.delete() }

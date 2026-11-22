@@ -248,7 +248,7 @@ class WebViewHarvester(private val context: Context) {
                 if (/(master|manifest|playlist)[^\/]*\.m3u8/i.test(u)) return 'm3u8';
                 if (/format=m3u8/i.test(u)) return 'm3u8';
                 if (/\.mp4(\?|#|$)/i.test(u)) {
-                  if (/(segment|fragment|chunk|seg-)/i.test(u)) return 'fragment';
+                  if (/(segment|fragment|chunk|seg-|init-)/i.test(u)) return 'fragment';
                   return 'mp4';
                 }
                 if (/\.(m4s|ts|webm)(\?|#|$)/i.test(u)) return 'fragment';
