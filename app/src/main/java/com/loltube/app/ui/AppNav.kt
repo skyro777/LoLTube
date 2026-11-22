@@ -56,8 +56,13 @@ fun AppNav() {
                     val s = season ?: -1
                     val e = episode ?: -1
                     val p = provider?.name ?: "AUTO"
+                    val startAtSec = when {
+                        startAtMs > 0 -> startAtMs / 1000
+                        startAtMs < 0 -> -1L
+                        else -> 0L
+                    }
                     navController.navigate(
-                        "player/$imdbId/$t?s=$s&e=$e&provider=$p&startAt=${startAtMs / 1000}"
+                        "player/$imdbId/$t?s=$s&e=$e&provider=$p&startAt=$startAtSec"
                     )
                 },
             )

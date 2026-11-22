@@ -109,11 +109,18 @@ fun PlayerScreen(
     val stats by vm.stats.collectAsState()
     val pendingNext by vm.pendingNext.collectAsState()
     val details by vm.details.collectAsState()
+    val activeReq by vm.activeRequest.collectAsState()
 
     var controlsVisible by remember { mutableStateOf(true) }
     var statsVisible by remember { mutableStateOf(false) }
     var seekFlash by remember { mutableStateOf<String?>(null) }
     var openMenu by remember { mutableStateOf<String?>(null) }
+    var lastInteractionMs by remember { mutableStateOf(System.currentTimeMillis()) }
+
+    fun interact() {
+        lastInteractionMs = System.currentTimeMillis()
+        controlsVisible = true
+    }
 
     val view = LocalView.current
     val isTv = remember { TvHelper.isTv(view.context) }
@@ -165,12 +172,13 @@ fun PlayerScreen(
     }
 
     fun showControls() {
-        controlsVisible = true
+        interact()
     }
 
     fun handleSeek(delta: Long) {
         vm.seekDelta(delta)
         seekFlash = (if (delta > 0) "+${delta / 1000}s" else "${delta / 1000}s")
+        interact()
     }
 
     androidx.activity.compose.BackHandler {
@@ -232,7 +240,7 @@ fun PlayerScreen(
             }
             .pointerInput(Unit) {
                 detectTapGestures(
-                    onTap = { controlsVisible = !controlsVisible },
+                    onTap = { controlsVisible = !controlsVisible; lastInteractionMs = System.currentTimeMillis() },
                     onDoubleTap = { vm.togglePlayPause() },
                 )
             },
@@ -406,11 +414,14 @@ fun PlayerScreen(
 
         // ---------------- controls ----------------
         if (controlsVisible && phase is PlayerViewModel.Phase.Ready) {
-            // auto-hide while playing
-            LaunchedEffect(isPlaying, openMenu) {
-                if (isPlaying && openMenu == null) {
-                    kotlinx.coroutines.delay(4500)
-                    controlsVisible = false
+            // auto-hide: 4.5s after the LAST interaction while playing, unless a menu is open
+            LaunchedEffect(isPlaying, openMenu, lastInteractionMs) {
+                while (isPlaying && openMenu == null) {
+                    kotlinx.coroutines.delay(4_500)
+                    if (System.currentTimeMillis() - lastInteractionMs >= 4_400) {
+                        controlsVisible = false
+                        break
+                    }
                 }
             }
 
@@ -438,14 +449,16 @@ fun PlayerScreen(
                     }
                     Column(Modifier.weight(1f)) {
                         Text(
-                            details?.name ?: request.title,
+                            details?.name ?: activeReq.title,
                             color = Color.White,
                             style = MaterialTheme.typography.titleMedium,
                             fontWeight = FontWeight.Bold,
                             maxLines = 1,
                         )
-                        val epInfo = request.season?.let { s ->
-                            request.episode?.let { e -> "S$s E$e · ${(vm.details.value?.episodes?.firstOrNull { it.season == s && it.number == e }?.name ?: "")}" }
+                        val epInfo = activeReq.season?.let { s ->
+                            activeReq.episode?.let { e ->
+                                "S$s E$e · " + (details?.episodes?.firstOrNull { it.season == s && it.number == e }?.name ?: "")
+                            }
                         }
                         if (epInfo != null) {
                             Text(
@@ -492,6 +505,7 @@ fun PlayerScreen(
                 // seek bar
                 var dragging by remember { mutableStateOf(false) }
                 var dragPos by remember { mutableStateOf(0f) }
+                var lastScrubApply by remember { mutableStateOf(0L) }
                 Column(Modifier.padding(horizontal = 20.dp)) {
                     Row(Modifier.fillMaxWidth()) {
                         Text(Format.time(if (dragging) dragPos.toLong() else positionMs), color = Color.White, fontSize = 12.sp)
@@ -501,7 +515,17 @@ fun PlayerScreen(
                     Slider(
                         value = (if (dragging) dragPos else positionMs.toFloat())
                             .coerceIn(0f, durationMs.toFloat().coerceAtLeast(1f)),
-                        onValueChange = { dragging = true; dragPos = it },
+                        onValueChange = {
+                            dragging = true
+                            dragPos = it
+                            lastInteractionMs = System.currentTimeMillis()
+                            // throttled immediate seek: works for touch drags AND D-pad scrubbing
+                            val now = System.currentTimeMillis()
+                            if (now - lastScrubApply > 400) {
+                                lastScrubApply = now
+                                vm.seekTo(it.toLong())
+                            }
+                        },
                         onValueChangeFinished = {
                             vm.seekTo(dragPos.toLong())
                             dragging = false

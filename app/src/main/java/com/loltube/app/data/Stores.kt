@@ -146,6 +146,12 @@ object ProgressStore {
     suspend fun get(context: Context, imdbId: String, season: Int?, episode: Int?): WatchProgress? =
         all(context).firstOrNull { it.imdbId == imdbId && it.season == season && it.episode == episode }
 
+    /** All progress entries of one show (episodes keyed "s:e"). */
+    suspend fun allForShow(context: Context, imdbId: String): Map<String, WatchProgress> =
+        all(context)
+            .filter { it.imdbId == imdbId && it.season != null && it.episode != null }
+            .associateBy { "${it.season}:${it.episode}" }
+
     /** Continue-watching list: only entries with meaningful progress. */
     suspend fun continueWatching(context: Context): List<WatchProgress> =
         all(context)

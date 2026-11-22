@@ -3,8 +3,8 @@ package com.loltube.app.ui
 import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
-import com.loltube.app.data.Catalog
 import com.loltube.app.data.Cinemeta
+import com.loltube.app.data.EpisodeInfo
 import com.loltube.app.data.MediaDetails
 import com.loltube.app.data.ProgressStore
 import com.loltube.app.providers.ProviderId
@@ -24,7 +24,24 @@ class DetailsViewModel(app: Application) : AndroidViewModel(app) {
         val movieProgress: ProgressStore.WatchProgress? = null,
         val watchedEpisodes: Set<String> = emptySet(),
         val episodeProgress: Map<String, ProgressStore.WatchProgress> = emptyMap(),
-    )
+    ) {
+        /** The episode the big Play button should start (first unwatched). */
+        val nextEpisode: EpisodeInfo? get() = details?.let { d ->
+            val firstRegular = d.seasons.firstOrNull { it >= 1 } ?: return@let null
+            for (s in d.seasons.filter { it >= 1 }.sorted()) {
+                val candidate = d.episodes
+                    .filter { it.season == s }
+                    .minByOrNull { it.number }
+                    ?.takeIf { "${it.season}:${it.number}" !in watchedEpisodes }
+                if (candidate != null) return@let candidate
+            }
+            d.episodes.filter { it.season == firstRegular }.minByOrNull { it.number }
+                ?: d.episodes.firstOrNull()
+        }
+
+        fun episodeStartAtMs(ep: EpisodeInfo): Long =
+            episodeProgress["${ep.season}:${ep.number}"]?.positionMs?.takeIf { it > 30_000 } ?: 0
+    }
 
     private val _state = MutableStateFlow(DetailsUiState())
     val state: StateFlow<DetailsUiState> = _state.asStateFlow()
@@ -41,12 +58,16 @@ class DetailsViewModel(app: Application) : AndroidViewModel(app) {
             val app = getApplication<Application>()
             val progress = ProgressStore.get(app, imdbId, null, null)
             val watched = ProgressStore.watchedEpisodes(app, imdbId)
+            val epProgress = if (details.type == "series") {
+                ProgressStore.allForShow(app, imdbId)
+            } else emptyMap()
             _state.value = DetailsUiState(
                 loading = false,
                 details = details,
                 selectedSeason = details.seasons.firstOrNull { it >= 1 } ?: 1,
                 movieProgress = progress,
                 watchedEpisodes = watched,
+                episodeProgress = epProgress,
             )
         }
     }

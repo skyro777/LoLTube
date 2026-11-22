@@ -66,7 +66,11 @@ fun DetailsScreen(
     onPlay: (imdbId: String, type: String, season: Int?, episode: Int?, provider: ProviderId?, startAtMs: Long) -> Unit,
 ) {
     val vm: DetailsViewModel = viewModel()
-    vm.load(imdbId, type)
+    var loadedKey by androidx.compose.runtime.saveable.rememberSaveable { androidx.compose.runtime.mutableStateOf("") }
+    if (loadedKey != "$imdbId:$type") {
+        loadedKey = "$imdbId:$type"
+        vm.load(imdbId, type)
+    }
     val state by vm.state.collectAsState()
 
     val details = state.details
@@ -97,8 +101,7 @@ fun DetailsScreen(
         item {
             PlaySection(
                 details = details,
-                providerChoice = state.provider,
-                movieResumeMs = state.movieProgress?.positionMs?.takeIf { it > 30_000 } ?: 0,
+                state = state,
                 onProvider = vm::setProvider,
                 onPlay = onPlay,
             )
@@ -265,19 +268,25 @@ private fun InfoSection(details: MediaDetails) {
 @Composable
 private fun PlaySection(
     details: MediaDetails,
-    providerChoice: ProviderId?,
-    movieResumeMs: Long,
+    state: DetailsViewModel.DetailsUiState,
     onProvider: (ProviderId?) -> Unit,
     onPlay: (String, String, Int?, Int?, ProviderId?, Long) -> Unit,
 ) {
     var providerMenu by remember { mutableStateOf(false) }
+    val movieResumeMs = state.movieProgress?.positionMs?.takeIf { it > 30_000 } ?: 0
+    val nextEp = state.nextEpisode
 
     Column(Modifier.padding(horizontal = 16.dp, vertical = 12.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Button(
                 onClick = {
-                    val startAt = if (details.type == "movie" && movieResumeMs > 0) movieResumeMs else 0
-                    onPlay(details.imdbId, details.type, null, null, providerChoice, startAt)
+                    if (details.type == "movie") {
+                        // >0 = explicit resume, -1 = start over, 0 = auto (resume if any)
+                        val startAt = if (movieResumeMs > 0) movieResumeMs else 0L
+                        onPlay(details.imdbId, details.type, null, null, state.provider, startAt)
+                    } else if (nextEp != null) {
+                        onPlay(details.imdbId, details.type, nextEp.season, nextEp.number, state.provider, 0)
+                    }
                 },
                 colors = ButtonDefaults.buttonColors(),
                 contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 24.dp, vertical = 12.dp),
@@ -289,21 +298,21 @@ private fun PlaySection(
                     if (details.type == "movie" && movieResumeMs > 0)
                         "Resume (${Format.time(movieResumeMs)})"
                     else if (details.type == "movie") "Play movie"
-                    else "Choose episode below",
+                    else "Play ${nextEp?.let { "S${it.season} E${it.number}" } ?: "episode"}",
                     fontWeight = FontWeight.Bold,
                 )
             }
             if (details.type == "movie" && movieResumeMs > 0) {
                 Spacer(Modifier.width(10.dp))
                 OutlinedButton(
-                    onClick = { onPlay(details.imdbId, details.type, null, null, providerChoice, 0) },
+                    onClick = { onPlay(details.imdbId, details.type, null, null, state.provider, -1L) },
                     modifier = Modifier.height(48.dp),
                 ) { Text("Start over") }
             }
             Spacer(Modifier.width(10.dp))
             Box {
                 OutlinedButton(onClick = { providerMenu = true }, modifier = Modifier.height(48.dp)) {
-                    Text(providerChoice?.label ?: "Auto")
+                    Text(state.provider?.label ?: "Auto")
                 }
                 DropdownMenu(expanded = providerMenu, onDismissRequest = { providerMenu = false }) {
                     DropdownMenuItem(

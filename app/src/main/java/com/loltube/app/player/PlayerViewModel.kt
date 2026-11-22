@@ -114,11 +114,17 @@ class PlayerViewModel(
     // ---- internals ---------------------------------------------------------
     private var settings: AppSettings = AppSettings()
     private var currentStream: ResolvedStream? = null
-    private var currentRequest: PlaybackRequest = request
     private val resolver = StreamResolver(context)
     private val rebufferTimes = mutableListOf<Long>()
     private var autoReResolved = false
     private var activeSubtitle: PlayerEngine.SubtitleSelection? = null
+
+    private val _currentRequest = MutableStateFlow(request)
+    val activeRequest: StateFlow<PlaybackRequest> get() = _currentRequest.asStateFlow()
+
+    private var currentRequest: PlaybackRequest
+        get() = _currentRequest.value
+        set(value) { _currentRequest.value = value }
 
     private val playerListener = object : Player.Listener {
         override fun onPlaybackStateChanged(playbackState: Int) {
@@ -212,6 +218,17 @@ class PlayerViewModel(
                 title = meta?.name ?: request.title,
                 posterUrl = meta?.poster,
             )
+
+            // resolve start position:
+            //  >0 explicit resume, <0 explicit restart, 0 auto (use saved progress)
+            val effectiveStartMs = when {
+                request.startAtMs > 0 -> request.startAtMs
+                request.startAtMs < 0 -> 0L
+                else -> ProgressStore.get(
+                    context, request.imdbId, request.season, request.episode,
+                )?.positionMs?.takeIf { it > 30_000 && it < 95_000 * 60 } ?: 0L
+            }
+            currentRequest = currentRequest.copy(startAtMs = effectiveStartMs)
 
             fetchSubtitles(currentRequest)
             startResolve(currentRequest, reusePlayer = false)
