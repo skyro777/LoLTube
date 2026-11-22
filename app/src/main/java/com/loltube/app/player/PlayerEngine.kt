@@ -92,7 +92,7 @@ object PlayerEngine {
         // ramps to a sane rendition immediately instead of crawling up from 480p.
         val bandwidthMeter = if (settings.lastBandwidthBps > 200_000) {
             DefaultBandwidthMeter.Builder(context)
-                .setInitialBitrateEstimate(settings.lastBandwidthBps)
+                .setInitialBitrateEstimate(settings.lastBandwidthBps.toLong())
                 .build()
         } else {
             DefaultBandwidthMeter.Builder(context).build()

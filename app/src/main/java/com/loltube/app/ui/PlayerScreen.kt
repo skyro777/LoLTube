@@ -2,6 +2,7 @@ package com.loltube.app.ui
 
 import android.app.Activity
 import android.content.ActivityInfo
+import android.content.ActivityInfo
 import android.content.Context
 import android.content.ContextWrapper
 import android.media.AudioManager
@@ -152,6 +153,7 @@ fun PlayerScreen(
     var openMenu by remember { mutableStateOf<String?>(null) }
     var lastInteractionMs by remember { mutableStateOf(System.currentTimeMillis()) }
     var gestureIndicator by remember { mutableStateOf<GestureIndicator?>(null) }
+    var gestureEpoch by remember { mutableStateOf(0) }
 
     fun interact() {
         lastInteractionMs = System.currentTimeMillis()
@@ -242,6 +244,7 @@ fun PlayerScreen(
             am.setStreamVolume(AudioManager.STREAM_MUSIC, next, 0)
         }
         gestureIndicator = GestureIndicator.Volume(volumePercent())
+        gestureEpoch++
     }
 
     // ---------------- brightness helper ----------------
@@ -250,6 +253,7 @@ fun PlayerScreen(
         val clamped = f.coerceIn(0.02f, 1f)
         w.attributes = w.attributes.apply { screenBrightness = clamped }
         gestureIndicator = GestureIndicator.Brightness((clamped * 100).roundToInt())
+        gestureEpoch++
     }
 
     // keep screen on while playing
@@ -281,6 +285,15 @@ fun PlayerScreen(
         if (seekFlash != null) {
             kotlinx.coroutines.delay(800)
             seekFlash = null
+        }
+    }
+
+    // gesture indicator auto-clear: 1.5s after the last update (covers D-pad volume
+    // on TV and any gesture that ends without a clean pointer-up)
+    LaunchedEffect(gestureEpoch) {
+        if (gestureEpoch > 0) {
+            kotlinx.coroutines.delay(1500)
+            gestureIndicator = null
         }
     }
 
@@ -390,7 +403,7 @@ fun PlayerScreen(
 
                     while (true) {
                         val event = awaitPointerEvent()
-                        if (event.changes.all { !it.isPressed }) break
+                        if (event.changes.all { !it.pressed }) break
                         val change = event.changes.firstOrNull { it.id == down.id } ?: continue
                         if (change.isConsumed) continue
                         val dx = change.position.x - startX
@@ -436,6 +449,7 @@ fun PlayerScreen(
                                         val delta = target - gestureBaseMs
                                         gestureIndicator =
                                             GestureIndicator.Seek(target, delta)
+                                        gestureEpoch++
                                         val now = System.currentTimeMillis()
                                         if (now - lastSeekApply > 350) {
                                             lastSeekApply = now

@@ -255,14 +255,15 @@ class PlayerViewModel(
             eventTime: AnalyticsListener.EventTime,
             totalLoadTimeMs: Int,
             totalBytesLoaded: Long,
-            bitrateEstimate: Int,
+            bitrateEstimate: Long,
         ) {
             if (bitrateEstimate <= 0) return
-            _stats.value = _stats.value.copy(bandwidthBps = bitrateEstimate)
+            val bps = bitrateEstimate.toInt()
+            _stats.value = _stats.value.copy(bandwidthBps = bps)
             val now = android.os.SystemClock.elapsedRealtime()
             if (now - lastBandwidthSaveMs > 15_000) {
                 lastBandwidthSaveMs = now
-                viewModelScope.launch { SettingsStore.setLastBandwidth(context, bitrateEstimate) }
+                viewModelScope.launch { SettingsStore.setLastBandwidth(context, bps) }
             }
         }
     }

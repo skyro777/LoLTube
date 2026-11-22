@@ -1,6 +1,6 @@
 # LoLTube
 
-**LoLTube** is a native Android app (Android 10+) that catalogs IMDb movies & series and plays them through free public streaming sources — with a playback engine built specifically for **smooth, buffer-free 4K** and **full aspect-ratio control** (no more black bars). Works on phones, tablets and **Android TV with the D-pad remote**.
+**LoLTube** is a native Android app (Android 9+) that catalogs IMDb movies & series and plays them through free public streaming sources — with a playback engine built specifically for **smooth, buffer-free 4K** and **full aspect-ratio control** (no more black bars). Works on phones, tablets and **Android TV with the D-pad remote**.
 
 > Personal-use project. LoLTube hosts no content — it only resolves streams from third-party public embed players (vidfast.vc / vidcore.io / mapple.fun) the same way a browser would, then plays the resulting HLS/DASH manifest in its own native player.
 
@@ -12,6 +12,19 @@ Grab the APK from the [**Latest Build** release](../../releases/tag/latest):
 - `LoLTube-debug.apk` — diagnostics build
 
 Every push to `main` rebuilds it automatically (GitHub Actions).
+
+## What's new in v0.2.0
+
+- **Android 9 support** — minSdk lowered to 28 so older TVs install it.
+- **Fixed silent audio** — the hardware-decoder filter no longer strips software audio decoders (that's what muted playback).
+- **True fullscreen** — the player now draws edge-to-edge under a hidden status bar (no more top black strip), extends into display cutouts, and **auto-rotates to landscape** on phones/tablets.
+- **Gestures** — swipe up/down on the **left half to change brightness**, on the **right half for volume**, horizontally to scrub; double-tap left/right edges = ±10 s. D-pad up/down = volume on TV.
+- **Search fixed** — now powered by the same Cinemeta backend that feeds the home screen (with IMDb suggest as fallback), works on every tab.
+- **Episode fix** — resuming a mostly-watched episode restarts it instead of rolling into the next one (S1E1 stays S1E1).
+- **Vidcore is the default source** (vidfast's CDN is currently slower); old installs migrate automatically.
+- **Stronger anti-buffering** — warm-started ABR (persists your measured bandwidth between sessions), deeper back-buffer (30 s), 45 s read timeout for slow CDN nodes, and automatic 1080p fallback if your line genuinely can't sustain 4K. Optional **Deep 4K buffer profile (45–120 s)** in Settings.
+- **Subtitles** — the stream's own embedded subtitle tracks now appear in the Subs menu (perfectly synced), alongside multi-language downloads.
+- **Modernized UI** — hero carousel, redesigned details/settings, animated focus, new theme.
 
 ## Why it plays 4K smoothly (when the websites stutter)
 

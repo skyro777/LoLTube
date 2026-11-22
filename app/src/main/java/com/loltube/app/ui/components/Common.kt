@@ -76,8 +76,6 @@ fun PosterCard(
                 .graphicsLayer {
                     shadowElevation = glow
                     shape = cardShape
-                    ambientColor = glowColor
-                    spotColor = glowColor
                 }
                 .clip(cardShape)
                 .background(MaterialTheme.colorScheme.surfaceVariant)

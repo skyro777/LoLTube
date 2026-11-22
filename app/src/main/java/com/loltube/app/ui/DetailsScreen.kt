@@ -406,8 +406,6 @@ private fun PlaySection(
                 .graphicsLayer {
                     shadowElevation = glow
                     shape = buttonShape
-                    ambientColor = glowColor
-                    spotColor = glowColor
                 }
                 .clip(buttonShape)
                 .background(

@@ -3,6 +3,7 @@ package com.loltube.app.ui
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -352,8 +353,6 @@ private fun HeroCard(entry: CatalogEntry, cardWidth: Dp, onClick: () -> Unit) {
                 scaleY = scale
                 shadowElevation = glow
                 shape = cardShape
-                ambientColor = glowColor
-                spotColor = glowColor
             }
             .clip(cardShape)
             .background(MaterialTheme.colorScheme.surfaceVariant)
@@ -510,8 +509,6 @@ private fun ContinueCard(
                 .graphicsLayer {
                     shadowElevation = glow
                     shape = cardShape
-                    ambientColor = glowColor
-                    spotColor = glowColor
                 }
                 .clip(cardShape)
                 .background(MaterialTheme.colorScheme.surfaceVariant)
