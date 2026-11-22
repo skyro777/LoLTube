@@ -12,10 +12,13 @@ import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.Surface
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
@@ -98,10 +101,12 @@ fun WebViewPlayerScreen(url: String, onBack: () -> Unit) {
         )
 
         // small always-visible back button so the user can never get stuck
-        Box(
-            Modifier
+        Surface(
+            color = Color(0x88000000),
+            shape = CircleShape,
+            modifier = Modifier
                 .align(Alignment.TopStart)
-                .background(Color(0x66000000))
+                .padding(10.dp),
         ) {
             IconButton(onClick = onBack) {
                 Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back", tint = Color.White)
