@@ -21,6 +21,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Star
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
@@ -34,6 +35,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -43,6 +45,11 @@ import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
 import com.loltube.app.data.CatalogEntry
 
+/**
+ * Standard catalog poster card: 2:3 artwork, bottom scrim, rating + year chips,
+ * 2-line title below. Focus (mouse hover, touch press or D-pad) scales the card
+ * and adds an amber glow + 2dp amber border so it is clearly readable on TV.
+ */
 @Composable
 fun PosterCard(
     entry: CatalogEntry,
@@ -52,24 +59,32 @@ fun PosterCard(
 ) {
     val interaction = remember { MutableInteractionSource() }
     val focused by interaction.collectIsFocusedAsState()
-    val scale by animateFloatAsState(if (focused) 1.06f else 1f, label = "cardScale")
+    val scale by animateFloatAsState(if (focused) 1.05f else 1f, label = "cardScale")
+    val glow by animateFloatAsState(if (focused) 22f else 0f, label = "cardGlow")
+    val cardShape = RoundedCornerShape(12.dp)
+    val glowColor = MaterialTheme.colorScheme.primary
 
     Column(
         modifier = modifier
-            .width(126.dp)
-            .scale(scale)
-            .clip(RoundedCornerShape(10.dp))
-            .background(Color.Transparent),
+            .width(120.dp)
+            .scale(scale),
     ) {
         Box(
             modifier = Modifier
                 .fillMaxWidth()
                 .aspectRatio(2f / 3f)
-                .clip(RoundedCornerShape(10.dp))
+                .graphicsLayer {
+                    shadowElevation = glow
+                    shape = cardShape
+                    ambientColor = glowColor
+                    spotColor = glowColor
+                }
+                .clip(cardShape)
+                .background(MaterialTheme.colorScheme.surfaceVariant)
                 .border(
                     width = if (focused) 2.dp else 0.dp,
                     color = if (focused) MaterialTheme.colorScheme.primary else Color.Transparent,
-                    shape = RoundedCornerShape(10.dp),
+                    shape = cardShape,
                 )
                 .clickable(interactionSource = interaction, indication = null, onClick = onClick),
         ) {
@@ -84,30 +99,30 @@ fun PosterCard(
                     .fillMaxSize()
                     .background(
                         Brush.verticalGradient(
-                            0.6f to Color.Transparent,
-                            1f to Color(0x99000000),
+                            0.55f to Color.Transparent,
+                            1f to Color(0x96000000),
                         )
                     )
             )
             if (!entry.imdbRating.isNullOrEmpty() && entry.imdbRating != "0") {
                 Surface(
-                    color = Color(0xCC000000),
+                    color = Color(0xCC0A0A0E),
                     contentColor = MaterialTheme.colorScheme.primary,
-                    shape = RoundedCornerShape(6.dp),
+                    shape = RoundedCornerShape(8.dp),
                     modifier = Modifier
                         .align(Alignment.BottomStart)
                         .padding(6.dp),
                 ) {
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
-                        modifier = Modifier.padding(horizontal = 5.dp, vertical = 1.dp),
+                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
                     ) {
                         Icon(
                             Icons.Filled.Star,
                             contentDescription = null,
                             modifier = Modifier.size(11.dp),
                         )
-                        Spacer(Modifier.width(2.dp))
+                        Spacer(Modifier.width(3.dp))
                         Text(
                             entry.imdbRating,
                             fontSize = 11.sp,
@@ -120,7 +135,7 @@ fun PosterCard(
                 Surface(
                     color = Color(0x88000000),
                     contentColor = Color.White,
-                    shape = RoundedCornerShape(6.dp),
+                    shape = RoundedCornerShape(8.dp),
                     modifier = Modifier
                         .align(Alignment.TopEnd)
                         .padding(6.dp),
@@ -128,7 +143,8 @@ fun PosterCard(
                     Text(
                         entry.releaseInfo.take(4),
                         fontSize = 10.sp,
-                        modifier = Modifier.padding(horizontal = 5.dp, vertical = 1.dp),
+                        fontWeight = FontWeight.Medium,
+                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
                     )
                 }
             }
@@ -137,6 +153,7 @@ fun PosterCard(
             Text(
                 entry.name,
                 style = MaterialTheme.typography.bodySmall,
+                fontWeight = FontWeight.Medium,
                 maxLines = 2,
                 overflow = TextOverflow.Ellipsis,
                 textAlign = TextAlign.Start,
@@ -148,6 +165,7 @@ fun PosterCard(
     }
 }
 
+/** Row of content under a bold section header (with a small amber accent bar). */
 @Composable
 fun MediaRow(
     title: String,
@@ -161,10 +179,18 @@ fun MediaRow(
                 .fillMaxWidth()
                 .padding(horizontal = 16.dp, vertical = 8.dp),
         ) {
+            Box(
+                Modifier
+                    .width(4.dp)
+                    .height(16.dp)
+                    .clip(RoundedCornerShape(2.dp))
+                    .background(MaterialTheme.colorScheme.primary)
+            )
+            Spacer(Modifier.width(10.dp))
             Text(
                 title,
                 style = MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.Bold,
+                fontWeight = FontWeight.ExtraBold,
             )
             if (subtitle != null) {
                 Spacer(Modifier.width(8.dp))
@@ -180,14 +206,28 @@ fun MediaRow(
     }
 }
 
+/** Bold section header with a slim amber accent bar on the leading edge. */
 @Composable
 fun SectionHeader(text: String, modifier: Modifier = Modifier) {
-    Text(
-        text,
-        style = MaterialTheme.typography.titleMedium,
-        fontWeight = FontWeight.Bold,
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
         modifier = modifier.padding(horizontal = 16.dp, vertical = 8.dp),
-    )
+    ) {
+        Box(
+            Modifier
+                .width(4.dp)
+                .height(16.dp)
+                .clip(RoundedCornerShape(2.dp))
+                .background(MaterialTheme.colorScheme.primary)
+        )
+        Spacer(Modifier.width(10.dp))
+        Text(
+            text,
+            style = MaterialTheme.typography.titleMedium,
+            fontWeight = FontWeight.ExtraBold,
+            letterSpacing = 0.2.sp,
+        )
+    }
 }
 
 @Composable
@@ -200,7 +240,8 @@ fun EmptyHint(text: String, modifier: Modifier = Modifier) {
     ) {
         Text(
             text,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.8f),
             textAlign = TextAlign.Center,
         )
     }
@@ -215,12 +256,16 @@ fun LoadingHint(text: String, modifier: Modifier = Modifier) {
         horizontalArrangement = Arrangement.Center,
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        androidx.compose.material3.CircularProgressIndicator(
+        CircularProgressIndicator(
             modifier = Modifier.size(22.dp),
             strokeWidth = 2.5.dp,
             color = MaterialTheme.colorScheme.primary,
         )
         Spacer(Modifier.width(12.dp))
-        Text(text, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Text(
+            text,
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
     }
 }

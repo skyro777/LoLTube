@@ -3,4 +3,9 @@
     <color name="ic_launcher_bg">#0E0E12</color>
     <color name="accent">#FFB300</color>
     <color name="tv_banner_bg">#101018</color>
+
+    <!-- Cinematic dark palette (mirrors Theme.kt) -->
+    <color name="loltube_background">#0A0A0E</color>
+    <color name="loltube_surface">#121218</color>
+    <color name="loltube_surface_variant">#1B1B22</color>
 </resources>
