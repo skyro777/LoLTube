@@ -21,3 +21,5 @@ captures/
 
 # Do NOT ignore keystore/ - the release keystore is intentionally committed
 # so CI can produce consistently-signed installable APKs (personal project).
+runlogs/
+*.zip

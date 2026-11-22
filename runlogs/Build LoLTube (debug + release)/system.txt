@@ -1,8 +1,0 @@
-2026-11-22T15:55:32.9370000Z Requested labels: ubuntu-latest
-2026-11-22T15:55:32.9370000Z Job defined at: skyro777/LoLTube/.github/workflows/build.yml@refs/heads/main
-2026-11-22T15:55:32.9370000Z Waiting for a runner to pick up this job...
-2026-11-22T15:55:32.9350000Z Evaluating apk.if
-2026-11-22T15:55:32.9350000Z Evaluating: success()
-2026-11-22T15:55:32.9350000Z Result: true
-2026-11-22T15:55:33.2070000Z Job is about to start running on the hosted runner: GitHub Actions 1000001417
-2026-11-22T15:55:33.2070000Z Job is waiting for a hosted runner to come online.
