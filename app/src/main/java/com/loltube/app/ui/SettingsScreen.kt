@@ -127,6 +127,14 @@ fun SettingsScreen(onBack: () -> Unit, onOpenLogs: () -> Unit) {
                             scope.launch { SettingsStore.setBufferProfile(context, profile) }
                         }
                     }
+                    CardSubHeader("Turbo download-ahead")
+                    CardDescription(
+                        "Downloads the next ~90 seconds of the video in parallel (3 connections) into the on-device cache while you watch, so slow servers never stall playback. Recommended ON."
+                    )
+                    ToggleRow(
+                        "Turbo prefetch (no-buffer engine)",
+                        settings.turboPrefetch,
+                    ) { v -> scope.launch { SettingsStore.setTurboPrefetch(context, v) } }
                 }
             }
 

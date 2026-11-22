@@ -17,10 +17,19 @@ private val Context.settingsStore by preferencesDataStore(name = "loltube_settin
 private val Context.progressStore by preferencesDataStore(name = "loltube_progress")
 
 enum class QualityMode(val label: String) {
-    AUTO_4K("Auto (adaptive, up to 4K)"),
-    FORCE_MAX("Force max quality (4K lock)"),
-    CAP_1080("Cap at 1080p"),
-    CAP_720("Cap at 720p"),
+    AUTO("Auto (adaptive, up to 4K)"),
+    MAX("Prefer 4K (adaptive, needs fast line)"),
+    CAP_1080("Cap at 1080p (smoothest HD)"),
+    CAP_720("Cap at 720p (slow lines)");
+
+    /** Legacy stored value migration: the old "FORCE_MAX" locked ABR off and
+     *  caused permanent rebuffering - map it to the adaptive MAX mode. */
+    companion object {
+        fun migrate(raw: String?): String? = when (raw) {
+            "FORCE_MAX" -> MAX.name
+            else -> raw
+        }
+    }
 }
 
 enum class AspectMode(val label: String) {
@@ -40,13 +49,15 @@ enum class BufferProfile(val label: String, val minMs: Int, val maxMs: Int, val 
 data class AppSettings(
     // Vidcore first — its CDN is measurably faster than vidfast's right now.
     val providerOrder: List<ProviderId> = listOf(ProviderId.VIDCORE, ProviderId.VIDFAST, ProviderId.MAPPLE),
-    val quality: QualityMode = QualityMode.AUTO_4K,
+    val quality: QualityMode = QualityMode.AUTO,
     val aspect: AspectMode = AspectMode.AUTO,
     val bufferProfile: BufferProfile = BufferProfile.SMOOTH,
     val autoNextEpisode: Boolean = true,
     val preferredSubtitleLang: String = "en",
     val subtitlesEnabled: Boolean = true,
     val lastBandwidthBps: Int = 0,
+    /** Parallel segment read-ahead into the disk cache (the "no buffering" engine). */
+    val turboPrefetch: Boolean = true,
 )
 
 object SettingsStore {
@@ -58,6 +69,7 @@ object SettingsStore {
     private val KEY_SUB_LANG = stringPreferencesKey("preferred_subtitle_lang")
     private val KEY_SUBS_ENABLED = booleanPreferencesKey("subtitles_enabled")
     private val KEY_LAST_BITRATE = intPreferencesKey("last_bandwidth_bps")
+    private val KEY_TURBO = booleanPreferencesKey("turbo_prefetch")
 
     /** The old shipped default order — silently migrated to the new Vidcore-first order. */
     private val LEGACY_DEFAULT_ORDER = listOf(ProviderId.VIDFAST, ProviderId.VIDCORE, ProviderId.MAPPLE)
@@ -65,13 +77,14 @@ object SettingsStore {
     fun flow(context: Context): Flow<AppSettings> = context.settingsStore.data.map { p ->
         AppSettings(
             providerOrder = parseProviders(p[KEY_PROVIDER_ORDER]),
-            quality = enumOr(p[KEY_QUALITY], QualityMode.AUTO_4K),
+            quality = enumOr(QualityMode.migrate(p[KEY_QUALITY]), QualityMode.AUTO),
             aspect = enumOr(p[KEY_ASPECT], AspectMode.AUTO),
             bufferProfile = enumOr(p[KEY_BUFFER], BufferProfile.SMOOTH),
             autoNextEpisode = p[KEY_AUTO_NEXT] ?: true,
             preferredSubtitleLang = p[KEY_SUB_LANG] ?: "en",
             subtitlesEnabled = p[KEY_SUBS_ENABLED] ?: true,
             lastBandwidthBps = p[KEY_LAST_BITRATE] ?: 0,
+            turboPrefetch = p[KEY_TURBO] ?: true,
         )
     }
 
@@ -109,6 +122,10 @@ object SettingsStore {
     suspend fun setLastBandwidth(context: Context, bps: Int) {
         if (bps <= 0) return
         context.settingsStore.edit { it[KEY_LAST_BITRATE] = bps }
+    }
+
+    suspend fun setTurboPrefetch(context: Context, v: Boolean) {
+        context.settingsStore.edit { it[KEY_TURBO] = v }
     }
 
     private fun parseProviders(raw: String?): List<ProviderId> {

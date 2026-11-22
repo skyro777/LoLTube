@@ -28,6 +28,16 @@ jobs:
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
 
+      - name: Restore release keystore
+        run: |
+          if [ -n "${{ secrets.LOLTUBE_KEYSTORE_BASE64 }}" ]; then
+            mkdir -p keystore
+            echo "${{ secrets.LOLTUBE_KEYSTORE_BASE64 }}" | base64 -d > keystore/loltube-release.p12
+            echo "release keystore restored from secret"
+          else
+            echo "no keystore secret - release APK will be debug-signed"
+          fi
+
       - name: Build
         run: ./gradlew assembleDebug assembleRelease --stacktrace --no-daemon
 

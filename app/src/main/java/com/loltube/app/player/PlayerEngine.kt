@@ -4,9 +4,9 @@ import android.content.Context
 import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MimeTypes
-import androidx.media3.common.TrackSelectionOverride
 import androidx.media3.common.util.UnstableApi
-import androidx.media3.datasource.DefaultDataSource
+import androidx.media3.datasource.DataSpec
+import androidx.media3.datasource.cache.CacheDataSource
 import androidx.media3.datasource.okhttp.OkHttpDataSource
 import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.DefaultRenderersFactory
@@ -24,24 +24,44 @@ import com.loltube.app.providers.MappleStreamInterceptor
 import com.loltube.app.util.AppLog
 
 /**
- * Builds ExoPlayer instances tuned for buttery-smooth 4K:
- *  - large buffers (see BufferProfile) so network dips never surface as rebuffering
- *  - hysteresis-heavy ABR (slow up-switch, quick down-switch) to avoid quality oscillation
- *  - hardware-decoder-only selection (software 4K decode = guaranteed stutter)
- *  - OkHttp transport (HTTP/2 multiplexing, connection pooling, keep-alive)
+ * Builds ExoPlayer instances tuned for stall-free playback:
+ *  - ABR that can actually DOWN-switch quickly (the previous parameters made
+ *    down-switching effectively impossible once the 30s buffer was full, which
+ *    locked playback to 4K on slow lines and rebuffered forever);
+ *  - a 400 MB on-disk segment cache + [TurboPrefetcher] parallel read-ahead;
+ *  - large time buffers with a matching byte budget (the default ~131 MB byte
+ *    cap silently truncated the 90s 4K buffer);
+ *  - hardware-decoder-only selection for video;
+ *  - OkHttp transport (HTTP/2 multiplexing, connection pooling, keep-alive).
  */
 @UnstableApi
 object PlayerEngine {
 
-    /** (minDurationForQualityIncrease, maxDurationForQualityDecrease, retainDiscarded, bandwidthFraction) */
-    private val ABR_4K = intArrayOf(25_000, 10_000, 25_000)
-    private const val ABR_BANDWIDTH_FRACTION = 0.62f
+    /**
+     * (minDurationForQualityIncreaseMs, maxDurationForQualityDecreaseMs,
+     *  minDurationToRetainAfterDiscardMs, bandwidthFraction)
+     *
+     * maxDurationForQualityDecrease is the important one: a down-switch is only
+     * allowed while buffered media < this. The old value of 10s made that
+     * unreachable with a 30s+ buffer, so ABR never down-switched. 75s means the
+     * player can drop to a sustainable quality as soon as throughput dips.
+     */
+    private const val ABR_MIN_INCREASE_MS = 10_000
+    private const val ABR_MAX_DECREASE_MS = 75_000
+    private const val ABR_RETAIN_MS = 25_000
+    private const val ABR_BANDWIDTH_FRACTION = 0.55f
+
+    /** A player plus the resources that must be released with it. */
+    data class Built(val player: ExoPlayer, val prefetcher: TurboPrefetcher)
 
     fun build(
         context: Context,
         settings: AppSettings,
         streamHeaders: Map<String, String>,
-    ): ExoPlayer {
+        prefetchEnabled: () -> Boolean = { true },
+        bufferAheadMs: () -> Long = { 0L },
+        positionMs: () -> Long = { 0L },
+    ): Built {
         val profile = settings.bufferProfile
 
         val loadControl = DefaultLoadControl.Builder()
@@ -51,14 +71,17 @@ object PlayerEngine {
                 profile.playbackMs,
                 profile.rebufferMs,
             )
+            // 90s of 4K@16Mbps is ~180MB; the default byte budget (~131MB) would
+            // silently cap the time buffer well below the configured value.
+            .setTargetBufferBytes(if (profile.maxMs >= 90_000) 230 shl 20 else 90 shl 20)
             .setBackBuffer(profile.backMs, true)
             .setPrioritizeTimeOverSizeThresholds(true)
             .build()
 
         val adaptiveFactory = AdaptiveTrackSelection.Factory(
-            ABR_4K[0],
-            ABR_4K[1],
-            ABR_4K[2],
+            ABR_MIN_INCREASE_MS,
+            ABR_MAX_DECREASE_MS,
+            ABR_RETAIN_MS,
             ABR_BANDWIDTH_FRACTION,
         )
         val trackSelector = DefaultTrackSelector(context, adaptiveFactory)
@@ -84,15 +107,21 @@ object PlayerEngine {
         val okClient = MappleStreamInterceptor.playbackClient(streamHeaders)
         val httpFactory = OkHttpDataSource.Factory(okClient)
             .setDefaultRequestProperties(streamHeaders)
-        val dataSourceFactory = DefaultDataSource.Factory(context, httpFactory)
 
-        val mediaSourceFactory = DefaultMediaSourceFactory(dataSourceFactory)
+        // Every byte the player reads (manifests + segments) flows through the
+        // 400MB disk cache; TurboPrefetcher fills it ahead of the playhead.
+        val cache = PlaybackCache.get(context)
+        val cacheFactory = CacheDataSource.Factory()
+            .setCache(cache)
+            .setUpstreamDataSourceFactory(httpFactory)
+            .setFlags(CacheDataSource.FLAG_IGNORE_CACHE_ON_ERROR)
+        val mediaSourceFactory = DefaultMediaSourceFactory(cacheFactory)
 
-        // Warm-start the ABR with the bandwidth we measured last session so playback
-        // ramps to a sane rendition immediately instead of crawling up from 480p.
+        // Warm-start the ABR with the bandwidth we measured last session (slightly
+        // conservative so an optimistic measurement doesn't pick 4K immediately).
         val bandwidthMeter = if (settings.lastBandwidthBps > 200_000) {
             DefaultBandwidthMeter.Builder(context)
-                .setInitialBitrateEstimate(settings.lastBandwidthBps.toLong())
+                .setInitialBitrateEstimate((settings.lastBandwidthBps * 0.8f).toLong())
                 .build()
         } else {
             DefaultBandwidthMeter.Builder(context).build()
@@ -116,21 +145,47 @@ object PlayerEngine {
             true,
         )
 
+        // auto-select the preferred subtitle language for embedded AND sidecar tracks
+        if (settings.preferredSubtitleLang.isNotBlank() && settings.preferredSubtitleLang != "off") {
+            player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
+                .setPreferredTextLanguage(settings.preferredSubtitleLang)
+                .build()
+        }
+
+        val prefetcher = TurboPrefetcher(
+            cache = cache,
+            cacheDataSourceFactory = cacheFactory,
+            enabled = prefetchEnabled,
+            bufferAheadMs = bufferAheadMs,
+            positionMs = positionMs,
+        )
+        player.addAnalyticsListener(prefetcher)
+
         applyQualityMode(player, settings.quality)
-        return player
+        return Built(player, prefetcher)
     }
 
-    /** Applies a quality mode to track selection parameters. */
+    /**
+     * Applies a quality mode. All modes stay adaptive (the old "force highest
+     * bitrate" flag disabled ABR entirely and guaranteed rebuffering); the
+     * difference is only how high the selection is allowed to climb. Capped
+     * modes also rewrite the master playlist via [CapPolicy].
+     */
     fun applyQualityMode(player: ExoPlayer, mode: QualityMode) {
         val params = player.trackSelectionParameters.buildUpon()
         when (mode) {
-            QualityMode.AUTO_4K -> params.setMaxVideoSize(3840, 2160)
-            QualityMode.FORCE_MAX -> params.setMaxVideoSize(3840, 2160).setForceHighestSupportedBitrate(true)
-            QualityMode.CAP_1080 -> params.setMaxVideoSize(1920, 1080)
-            QualityMode.CAP_720 -> params.setMaxVideoSize(1280, 720)
+            QualityMode.AUTO -> params.setMaxVideoSize(3840, 2160)
+            QualityMode.MAX -> params.setMaxVideoSize(3840, 2160)
+            QualityMode.CAP_1080 -> params.setMaxVideoSize(1920, 1088)
+            QualityMode.CAP_720 -> params.setMaxVideoSize(1280, 736)
         }
         player.trackSelectionParameters = params.build()
-        AppLog.d("Player", "quality mode -> $mode")
+        CapPolicy.maxVideoHeight = when (mode) {
+            QualityMode.AUTO, QualityMode.MAX -> 2160
+            QualityMode.CAP_1080 -> 1088
+            QualityMode.CAP_720 -> 736
+        }
+        AppLog.d("Player", "quality mode -> $mode (manifest cap ${CapPolicy.maxVideoHeight}p)")
     }
 
     /** True if a 4K hardware decoder exists for HEVC/AVC at 3840x2160@30. */
@@ -144,39 +199,6 @@ object PlayerEngine {
     } catch (t: Throwable) {
         AppLog.e("Player", "codec probe failed: ${t.message}")
         false
-    }
-
-    /**
-     * FORCE_MAX fallback: given current tracks, pick the highest-resolution video
-     * format and hard-override to it (no ABR oscillation at all).
-     */
-    fun forceHighestVideo(player: ExoPlayer): Boolean {
-        var bestGroup = -1
-        var bestTrack = -1
-        var bestScore = -1L
-        val tracks = player.currentTracks
-        for (gi in 0 until tracks.groups.size) {
-            val group = tracks.groups[gi]
-            if (group.type != C.TRACK_TYPE_VIDEO) continue
-            for (ti in 0 until group.length) {
-                if (!group.isTrackSupported(ti)) continue
-                val fmt = group.getTrackFormat(ti)
-                val score = fmt.height.toLong() * 1_000_000L + fmt.bitrate
-                if (score > bestScore) {
-                    bestScore = score
-                    bestGroup = gi
-                    bestTrack = ti
-                }
-            }
-        }
-        if (bestGroup < 0) return false
-        val mediaGroup = tracks.groups[bestGroup].mediaTrackGroup
-        val override = TrackSelectionOverride(mediaGroup, bestTrack)
-        player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
-            .setOverrideForType(override)
-            .build()
-        AppLog.d("Player", "forced highest video track (group $bestGroup track $bestTrack)")
-        return true
     }
 
     fun buildMediaItem(
@@ -199,6 +221,7 @@ object PlayerEngine {
                         .setMimeType(subtitle.mime)
                         .setLanguage(subtitle.language)
                         .setLabel(subtitle.label)
+                        .setSelectionFlags(C.SELECTION_FLAG_DEFAULT)
                         .build()
                 )
             )

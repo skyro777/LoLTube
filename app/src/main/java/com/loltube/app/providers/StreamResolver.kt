@@ -1,6 +1,7 @@
 package com.loltube.app.providers
 
 import android.content.Context
+import com.loltube.app.player.ManifestCapInterceptor
 import com.loltube.app.util.AppLog
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
@@ -38,13 +39,14 @@ class StreamResolver(private val context: Context) {
             AppLog.d("Resolver", "=== ${id.label}: $embed")
 
             val harvester = WebViewHarvester(context)
-            val candidates = try {
+            val harvest = try {
                 harvester.harvest(embed)
             } catch (t: Throwable) {
                 AppLog.e("Resolver", "${id.label} harvest crashed: ${t.message}")
                 attempts.add(Attempt(id, "Harvester error: ${t.message}"))
                 continue
             }
+            val candidates = harvest.candidates
 
             if (candidates.isEmpty()) {
                 attempts.add(Attempt(id, "No video requests captured (player blocked or slow)"))
@@ -65,6 +67,7 @@ class StreamResolver(private val context: Context) {
                 provider = id,
                 headers = headers,
                 allCandidates = candidates,
+                subs = harvest.subs,
             ) to attempts
         }
         return null to attempts
@@ -115,12 +118,14 @@ class MappleStreamInterceptor : Interceptor {
     }
 
     companion object {
-        /** Client for playback: keep-alive + mapple fragment proxy support.
-         *  Long read timeout: 4K segments are big and some CDN nodes are slow —
-         *  a short timeout kills in-flight segment loads and surfaces as a rebuffer. */
+        /** Client for playback: keep-alive + mapple fragment proxy support +
+         *  master-playlist resolution capping. Long read timeout: 4K segments are
+         *  big and some CDN nodes are slow — a short timeout kills in-flight
+         *  segment loads and surfaces as a rebuffer. */
         fun playbackClient(headers: Map<String, String>): OkHttpClient {
             return NetBase.newBuilder()
                 .addInterceptor(MappleStreamInterceptor())
+                .addInterceptor(ManifestCapInterceptor())
                 .connectTimeout(15, TimeUnit.SECONDS)
                 .readTimeout(45, TimeUnit.SECONDS)
                 .callTimeout(0, TimeUnit.MILLISECONDS)

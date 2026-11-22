@@ -29,6 +29,8 @@ data class ResolvedStream(
     val provider: ProviderId,
     val headers: Map<String, String>,
     val allCandidates: List<StreamCandidate> = emptyList(),
+    /** Subtitles the provider page itself listed (captured during the harvest). */
+    val subs: List<com.loltube.app.data.Wyzie.Sub> = emptyList(),
 )
 
 object Providers {

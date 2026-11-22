@@ -95,7 +95,7 @@ class PlayerViewModel(
     private val _videoSize = MutableStateFlow<VideoSize?>(null)
     val videoSize: StateFlow<VideoSize?> = _videoSize.asStateFlow()
 
-    private val _qualityMode = MutableStateFlow(QualityMode.AUTO_4K)
+    private val _qualityMode = MutableStateFlow(QualityMode.AUTO)
     val qualityMode: StateFlow<QualityMode> = _qualityMode.asStateFlow()
 
     private val _aspectMode = MutableStateFlow(AspectMode.AUTO)
@@ -132,6 +132,14 @@ class PlayerViewModel(
     private val rebufferTimes = mutableListOf<Long>()
     private var autoReResolved = false
     private var activeSubtitle: PlayerEngine.SubtitleSelection? = null
+    private var providerSubs: List<Wyzie.Sub> = emptyList()
+    private var prefetcher: TurboPrefetcher? = null
+
+    // stall watchdog state
+    @Volatile private var bufferingSinceMs = 0L
+    @Volatile private var stallStage = 0
+    @Volatile private var hadFirstReady = false
+    @Volatile private var switchingSource = false
 
     private val _currentRequest = MutableStateFlow(request)
     val activeRequest: StateFlow<PlaybackRequest> get() = _currentRequest.asStateFlow()
@@ -143,27 +151,34 @@ class PlayerViewModel(
     private val playerListener = object : Player.Listener {
         override fun onPlaybackStateChanged(playbackState: Int) {
             _buffering.value = playbackState == Player.STATE_BUFFERING
-            if (playbackState == Player.STATE_READY) {
-                val p = player.value ?: return
-                if (p.duration > 0) _durationMs.value = p.duration
-            }
-            if (playbackState == Player.STATE_ENDED) onEnded()
-            if (playbackState == Player.STATE_BUFFERING && _isPlaying.value) {
-                val now = android.os.SystemClock.elapsedRealtime()
-                synchronized(rebufferTimes) {
-                    rebufferTimes.add(now)
-                    rebufferTimes.removeAll { now - it > 60_000 }
-                    _stats.value = _stats.value.copy(rebuffers = rebufferTimes.size)
-                    when {
-                        rebufferTimes.size >= 3 && _qualityMode.value == QualityMode.FORCE_MAX -> {
-                            rebufferTimes.clear()
-                            downgradeForStability()
-                        }
-                        rebufferTimes.size >= 4 && _qualityMode.value == QualityMode.AUTO_4K -> {
-                            // ABR couldn't find a sustainable tier on its own — cap it.
-                            rebufferTimes.clear()
-                            setQuality(QualityMode.CAP_1080)
-                            _message.value = "Network can't sustain this quality — capped to 1080p"
+            when (playbackState) {
+                Player.STATE_READY -> {
+                    val p = player.value ?: return
+                    if (p.duration > 0) _durationMs.value = p.duration
+                    hadFirstReady = true
+                    bufferingSinceMs = 0
+                    stallStage = 0
+                }
+
+                Player.STATE_ENDED -> onEnded()
+
+                Player.STATE_BUFFERING -> {
+                    val now = android.os.SystemClock.elapsedRealtime()
+                    if (bufferingSinceMs == 0L) bufferingSinceMs = now
+                    if (_isPlaying.value) {
+                        synchronized(rebufferTimes) {
+                            rebufferTimes.add(now)
+                            rebufferTimes.removeAll { now - it > 60_000 }
+                            _stats.value = _stats.value.copy(rebuffers = rebufferTimes.size)
+                            // 4 rebuffers in a minute while on an uncapped mode ->
+                            // the line clearly can't sustain it, step down.
+                            if (rebufferTimes.size >= 4 &&
+                                (_qualityMode.value == QualityMode.AUTO || _qualityMode.value == QualityMode.MAX)
+                            ) {
+                                rebufferTimes.clear()
+                                setQuality(QualityMode.CAP_1080)
+                                _message.value = "Network can't sustain this quality — capped to 1080p"
+                            }
                         }
                     }
                 }
@@ -236,9 +251,6 @@ class PlayerViewModel(
             p.videoFormat?.let { f ->
                 _stats.value = _stats.value.copy(videoHeight = f.height, videoBitrate = f.bitrate)
             }
-            if (_qualityMode.value == QualityMode.FORCE_MAX) {
-                PlayerEngine.forceHighestVideo(p)
-            }
         }
     }
 
@@ -306,9 +318,11 @@ class PlayerViewModel(
 
             // resolve start position:
             //  >0 explicit resume, <0 explicit restart, 0 auto (use saved progress).
-            //  A saved position that is >= 90% into the file is treated as "already
-            //  watched" — restart at 0 instead of jumping to the credits (which used
-            //  to instantly end the episode and roll into the NEXT one).
+            //  A saved position that is >= 90% into the file - or leaves less than
+            //  2 minutes - counts as "already watched": restart at 0 instead of
+            //  resuming into the credits (which instantly ended the episode and
+            //  rolled into the NEXT one, making it look like the wrong episode
+            //  was playing).
             val effectiveStartMs = when {
                 request.startAtMs > 0 -> request.startAtMs
                 request.startAtMs < 0 -> 0L
@@ -318,7 +332,9 @@ class PlayerViewModel(
                     )
                     val finished = saved != null && saved.durationMs > 0 &&
                             saved.positionMs > saved.durationMs * 90 / 100
-                    if (finished) 0L
+                    val nearEnd = saved != null && saved.durationMs > 0 &&
+                            saved.durationMs - saved.positionMs < 120_000
+                    if (finished || nearEnd) 0L
                     else saved?.positionMs?.takeIf { it > 30_000 && it < 95_000 * 60 } ?: 0L
                 }
             }
@@ -331,24 +347,37 @@ class PlayerViewModel(
 
     private fun fetchSubtitles(req: PlaybackRequest) {
         viewModelScope.launch {
-            val subs = Wyzie.fetch(req.imdbId, req.season, req.episode)
-            _subs.value = subs
+            val wyzieSubs = Wyzie.fetch(req.imdbId, req.season, req.episode)
+            mergeSubs(wyzieSubs)
             // Embedded manifest tracks are auto-picked in onTracksChanged (they only
             // exist once the player has parsed the manifest).
-            if (settings.subtitlesEnabled && activeSubtitle == null) {
+            if (settings.subtitlesEnabled && activeSubtitle == null && _activeSubLabel.value == null) {
                 val pref = settings.preferredSubtitleLang.lowercase()
-                val match = subs.firstOrNull { s ->
+                val match = _subs.value.firstOrNull { s ->
                     s.language?.lowercase() == pref || s.display.lowercase().startsWith(pref)
-                } ?: subs.firstOrNull { it.display.contains("english", true) }
+                } ?: _subs.value.firstOrNull { it.display.contains("english", true) }
                 if (match != null) selectSubtitle(match)
             }
         }
     }
 
-    private fun startResolve(req: PlaybackRequest, reusePlayer: Boolean) {
+    /** Combine the provider-harvested listing with the directly-fetched one. */
+    private fun mergeSubs(extra: List<Wyzie.Sub>) {
+        val merged = (providerSubs + extra)
+            .filter { it.url.isNotBlank() }
+            .distinctBy { it.url }
+            .sortedByDescending { it.language?.lowercase() == settings.preferredSubtitleLang.lowercase() }
+        _subs.value = merged
+    }
+
+    private fun startResolve(
+        req: PlaybackRequest,
+        reusePlayer: Boolean,
+        forceOrder: List<ProviderId>? = null,
+    ) {
         viewModelScope.launch {
-            _phase.value = Phase.Resolving(providerChoice?.label ?: "Auto", "Starting…")
-            val order = providerChoice?.let { listOf(it) } ?: settings.providerOrder
+            _phase.value = Phase.Resolving((forceOrder?.first() ?: providerChoice)?.label ?: "Auto", "Starting…")
+            val order = forceOrder ?: providerChoice?.let { listOf(it) } ?: settings.providerOrder
 
             val (stream, attempts) = resolver.resolve(req, order) { id, status ->
                 _phase.value = Phase.Resolving(id.label, status)
@@ -365,16 +394,33 @@ class PlayerViewModel(
 
             currentStream = stream
             currentRequest = req
+            providerSubs = stream.subs
+            if (providerSubs.isNotEmpty()) mergeSubs(emptyList())
 
-            val p = (if (reusePlayer) player.value else null)
-                ?: PlayerEngine.build(context, settings, stream.headers).also {
-                    it.addListener(playerListener)
-                    it.addAnalyticsListener(analyticsListener)
-                    _player.value = it
+            val existing = if (reusePlayer) player.value else null
+            val p = existing
+                ?: PlayerEngine.build(
+                    context = context,
+                    settings = settings,
+                    streamHeaders = stream.headers,
+                    prefetchEnabled = { settings.turboPrefetch },
+                    bufferAheadMs = { (_bufferedMs.value - _positionMs.value).coerceAtLeast(0) },
+                    positionMs = { _positionMs.value },
+                ).let { built ->
+                    built.player.addListener(playerListener)
+                    built.player.addAnalyticsListener(analyticsListener)
+                    _player.value = built.player
+                    prefetcher = built.prefetcher
                     startLoops()
+                    built.player
                 }
 
             PlayerEngine.applyQualityMode(p, _qualityMode.value)
+
+            autoReResolved = false
+            bufferingSinceMs = 0
+            stallStage = 0
+            switchingSource = false
 
             val mediaItem = PlayerEngine.buildMediaItem(stream.url, stream.kind, null, activeSubtitle)
             p.setMediaItem(mediaItem, if (req.startAtMs > 0) req.startAtMs else 0)
@@ -384,10 +430,70 @@ class PlayerViewModel(
         }
     }
 
-    private fun downgradeForStability() {
-        _qualityMode.value = QualityMode.AUTO_4K
-        player.value?.let { PlayerEngine.applyQualityMode(it, QualityMode.AUTO_4K) }
-        _message.value = "Repeated buffering detected — switched to Auto quality"
+    // ---- stall watchdog -------------------------------------------------------
+    //
+    // If playback keeps buffering for a long stretch the ladder is:
+    //   1) cap quality to 1080p (survives slow lines),
+    //   2) re-prepare the stream (recovers dead loaders),
+    //   3) silently switch to the next provider at the same position.
+    // Each step re-arms the timer; any recovery (STATE_READY) resets it.
+
+    private fun checkStallWatchdog() {
+        val since = bufferingSinceMs
+        if (since == 0L) return
+        val now = android.os.SystemClock.elapsedRealtime()
+        val stalledFor = now - since
+        val stage0Timeout = if (hadFirstReady) 12_000L else 20_000L
+
+        when {
+            stallStage == 0 && stalledFor > stage0Timeout -> {
+                bufferingSinceMs = now
+                stallStage = 1
+                if (_qualityMode.value == QualityMode.AUTO || _qualityMode.value == QualityMode.MAX) {
+                    setQuality(QualityMode.CAP_1080)
+                    _message.value = "Slow line detected — capped to 1080p for smooth playback"
+                } else {
+                    reprepareStream("Reconnecting stream…")
+                }
+            }
+
+            stallStage == 1 && stalledFor > 12_000L -> {
+                bufferingSinceMs = now
+                stallStage = 2
+                reprepareStream("Still buffering — reconnecting…")
+            }
+
+            stallStage == 2 && stalledFor > 15_000L -> {
+                bufferingSinceMs = 0
+                stallStage = 3
+                autoSwitchProvider()
+            }
+        }
+    }
+
+    private fun reprepareStream(msg: String) {
+        val p = player.value ?: return
+        AppLog.d("Watchdog", msg)
+        _message.value = msg
+        try {
+            p.prepare()
+        } catch (t: Throwable) {
+            AppLog.d("Watchdog", "prepare failed: ${t.message}")
+        }
+    }
+
+    private fun autoSwitchProvider() {
+        if (switchingSource) return
+        val stream = currentStream ?: return
+        val order = settings.providerOrder
+        if (order.size < 2) return
+        val idx = order.indexOf(stream.provider)
+        val next = order[(idx + 1) % order.size]
+        switchingSource = true
+        AppLog.d("Watchdog", "stalling on ${stream.provider.label} — switching to ${next.label}")
+        _message.value = "This source is stalling — switching to ${next.label}…"
+        val pos = _positionMs.value
+        startResolve(currentRequest.copy(startAtMs = pos), reusePlayer = true, forceOrder = listOf(next))
     }
 
     // ---- progress ----------------------------------------------------------
@@ -399,6 +505,7 @@ class PlayerViewModel(
                 _positionMs.value = pl.currentPosition.coerceAtLeast(0)
                 if (pl.duration > 0) _durationMs.value = pl.duration
                 _bufferedMs.value = pl.bufferedPosition.coerceAtLeast(0)
+                checkStallWatchdog()
             }
         }
         viewModelScope.launch {
@@ -457,12 +564,9 @@ class PlayerViewModel(
         _qualityMode.value = mode
         val p = player.value ?: return
         PlayerEngine.applyQualityMode(p, mode)
-        if (mode == QualityMode.FORCE_MAX) {
-            PlayerEngine.forceHighestVideo(p)
-        } else {
-            p.trackSelectionParameters = p.trackSelectionParameters.buildUpon()
-                .clearOverridesOfType(C.TRACK_TYPE_VIDEO).build()
-        }
+        // ABR stays fully adaptive in every mode; only the ceiling changes.
+        p.trackSelectionParameters = p.trackSelectionParameters.buildUpon()
+            .clearOverridesOfType(C.TRACK_TYPE_VIDEO).build()
         viewModelScope.launch { SettingsStore.setQuality(context, mode) }
     }
 
@@ -471,29 +575,23 @@ class PlayerViewModel(
         viewModelScope.launch { SettingsStore.setAspect(context, mode) }
     }
 
+    /**
+     * Attach a downloaded sidecar subtitle. Race-free: the download happens first,
+     * and afterwards we re-read the player - if it now exists we re-attach the
+     * media item with the subtitle (the old code stored it for later in a window
+     * where the player could already be playing, so subtitles silently never
+     * appeared).
+     */
     fun selectSubtitle(sub: Wyzie.Sub?) {
-        val p = player.value
         if (sub == null) {
             activeSubtitle = null
             _activeSubLabel.value = null
-            disableAllTextTracks(p)
-            return
-        }
-        if (p == null) {
-            // player not ready yet - remember for later
-            viewModelScope.launch {
-                val dl = Wyzie.download(sub) ?: return@launch
-                activeSubtitle = PlayerEngine.SubtitleSelection(
-                    file = dl.first, mime = dl.second,
-                    language = sub.language, label = sub.display,
-                )
-                _activeSubLabel.value = sub.display
-            }
+            disableAllTextTracks(player.value)
             return
         }
         viewModelScope.launch {
             val dl = Wyzie.download(sub) ?: run {
-                _message.value = "Couldn't download subtitle"
+                _message.value = "Couldn't download subtitle (${sub.display})"
                 return@launch
             }
             val sel = PlayerEngine.SubtitleSelection(
@@ -502,16 +600,22 @@ class PlayerViewModel(
             )
             activeSubtitle = sel
             _activeSubLabel.value = sub.display
-            val stream = currentStream ?: return@launch
-            val pos = _positionMs.value
-            val mediaItem = PlayerEngine.buildMediaItem(stream.url, stream.kind, null, sel)
-            p.setMediaItem(mediaItem, pos)
-            p.prepare()
-            p.playWhenReady = true
-            p.trackSelectionParameters = p.trackSelectionParameters.buildUpon()
-                .clearOverridesOfType(C.TRACK_TYPE_TEXT)
-                .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, false)
-                .build()
+
+            val p = player.value
+            if (p != null) {
+                val stream = currentStream ?: return@launch
+                val pos = _positionMs.value
+                val mediaItem = PlayerEngine.buildMediaItem(stream.url, stream.kind, null, sel)
+                p.setMediaItem(mediaItem, pos)
+                p.prepare()
+                p.playWhenReady = true
+                p.trackSelectionParameters = p.trackSelectionParameters.buildUpon()
+                    .clearOverridesOfType(C.TRACK_TYPE_TEXT)
+                    .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, false)
+                    .setPreferredTextLanguage(sub.language ?: sub.display)
+                    .build()
+            }
+            // player == null: startResolve picks activeSubtitle up when it builds
         }
     }
 
@@ -552,34 +656,35 @@ class PlayerViewModel(
         autoReResolved = false
         viewModelScope.launch {
             settings = SettingsStore.read(context)
-            val req = currentRequest.copy(startAtMs = 0)
-            if (provider == null) {
-                startResolve(req, reusePlayer = false)
-            } else {
-                _phase.value = Phase.Resolving(provider.label, "Starting…")
-                val (stream, attempts) = resolver.resolve(req, listOf(provider)) { id, status ->
-                    _phase.value = Phase.Resolving(id.label, status)
-                }
-                if (stream == null) {
-                    _phase.value = Phase.Failed(attempts.joinToString("\n") { "${it.provider.label}: ${it.error}" })
-                    return@launch
-                }
-                currentStream = stream
-                currentRequest = req
-                val p = PlayerEngine.build(context, settings, stream.headers).also {
-                    it.addListener(playerListener)
-                    it.addAnalyticsListener(analyticsListener)
-                    _player.value = it
-                    startLoops()
-                }
-                PlayerEngine.applyQualityMode(p, _qualityMode.value)
-                val mediaItem = PlayerEngine.buildMediaItem(stream.url, stream.kind, null, activeSubtitle)
-                p.setMediaItem(mediaItem, 0)
-                p.prepare()
-                p.playWhenReady = true
-                _phase.value = Phase.Ready(stream.provider, stream.kind, stream.allCandidates.size)
-            }
+            // keep the watched position when switching sources manually
+            val pos = _positionMs.value
+            val startAt = if (pos > 30_000) pos else 0L
+            startResolve(currentRequest.copy(startAtMs = startAt), reusePlayer = false,
+                forceOrder = provider?.let { listOf(it) })
         }
+    }
+
+    /** Jump to another episode of the same show from inside the player. */
+    fun switchEpisode(season: Int, episode: Int) {
+        if (currentRequest.season == season && currentRequest.episode == episode) return
+        val req = currentRequest.copy(season = season, episode = episode, startAtMs = 0)
+        autoReResolved = false
+        embeddedAutoTried = false
+        synchronized(rebufferTimes) { rebufferTimes.clear() }
+        bufferingSinceMs = 0
+        stallStage = 0
+        switchingSource = false
+        _stats.value = Stats()
+        _pendingNext.value = null
+        _subs.value = emptyList()
+        providerSubs = emptyList()
+        _activeSubLabel.value = null
+        activeSubtitle = null
+        _embeddedTextTracks.value = emptyList()
+        _message.value = "Loading S$season E$episode…"
+        currentRequest = req
+        fetchSubtitles(req)
+        startResolve(req, reusePlayer = true)
     }
 
     // ---- next episode --------------------------------------------------------
@@ -612,18 +717,8 @@ class PlayerViewModel(
     fun playNextNow() {
         val next = _pendingNext.value ?: return
         _pendingNext.value = null
-        val req = currentRequest.copy(season = next.season, episode = next.episode, startAtMs = 0)
-        autoReResolved = false
-        synchronized(rebufferTimes) { rebufferTimes.clear() }
-        _stats.value = Stats()
-        currentRequest = req
-        _subs.value = emptyList()
-        _activeSubLabel.value = null
-        activeSubtitle = null
+        switchEpisode(next.season, next.episode)
         _message.value = "Loading next episode…"
-        embeddedAutoTried = false
-        fetchSubtitles(req)
-        startResolve(req, reusePlayer = true)
     }
 
     private fun nextEpisode(d: MediaDetails, s: Int, e: Int): Triple<Int, Int, String>? {
@@ -635,6 +730,8 @@ class PlayerViewModel(
     }
 
     private fun releasePlayer() {
+        prefetcher?.stop()
+        prefetcher = null
         player.value?.let {
             it.removeListener(playerListener)
             it.removeAnalyticsListener(analyticsListener)

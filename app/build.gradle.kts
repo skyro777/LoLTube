@@ -13,8 +13,8 @@ android {
         applicationId = "com.loltube.app"
         minSdk = 28 // Android 9 (many TVs still ship with it)
         targetSdk = 34
-        versionCode = 2
-        versionName = "0.2.0"
+        versionCode = 3
+        versionName = "0.3.0"
     }
 
     val ksFile = rootProject.file("keystore/loltube-release.p12")
@@ -91,4 +91,6 @@ dependencies {
     implementation("androidx.media3:media3-exoplayer-hls:$media3")
     implementation("androidx.media3:media3-exoplayer-dash:$media3")
     implementation("androidx.media3:media3-datasource-okhttp:$media3")
+    // SimpleCache index storage for the segment cache / turbo prefetch
+    implementation("androidx.media3:media3-database:$media3")
 }

@@ -23,3 +23,4 @@ captures/
 # so CI can produce consistently-signed installable APKs (personal project).
 runlogs/
 *.zip
+local.properties

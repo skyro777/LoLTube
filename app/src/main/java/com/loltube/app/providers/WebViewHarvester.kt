@@ -11,17 +11,22 @@ import android.webkit.JavascriptInterface
 import android.webkit.SslErrorHandler
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceRequest
+import android.webkit.WebResourceResponse
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.webkit.WebViewCompat
 import androidx.webkit.WebViewFeature
+import com.loltube.app.data.Net
+import com.loltube.app.data.Wyzie
 import com.loltube.app.util.AppLog
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.serialization.builtins.ListSerializer
+import java.io.ByteArrayInputStream
 import java.util.concurrent.CopyOnWriteArrayList
 
 /**
@@ -33,6 +38,12 @@ import java.util.concurrent.CopyOnWriteArrayList
  * The WebView is muted, popups are blocked, and cross-origin navigations
  * (popunder ad redirects) are cancelled.
  */
+/** Result of one harvest run: playable stream candidates + subtitle listing. */
+data class HarvestResult(
+    val candidates: List<StreamCandidate>,
+    val subs: List<Wyzie.Sub>,
+)
+
 @SuppressLint("SetJavaScriptEnabled", "JavascriptInterface")
 class WebViewHarvester(private val context: Context) {
 
@@ -42,6 +53,7 @@ class WebViewHarvester(private val context: Context) {
     @Volatile private var sawPlaying = false
     @Volatile private var webViewRef: WebView? = null
     @Volatile private var pageHost: String = ""
+    @Volatile private var capturedSubs: List<Wyzie.Sub> = emptyList()
 
     private val bridge = object {
         @JavascriptInterface
@@ -71,13 +83,16 @@ class WebViewHarvester(private val context: Context) {
 
     /**
      * Loads [url] and waits until a video manifest is very likely captured.
-     * Returns whatever candidates were seen (may be empty).
+     * Returns the stream candidates plus any subtitle listing the page itself
+     * requested (captured via the request interceptor - immune to API-level
+     * or Cloudflare changes on the /wyzie endpoint).
      */
-    suspend fun harvest(url: String, timeoutMs: Long = 45_000): List<StreamCandidate> {
+    suspend fun harvest(url: String, timeoutMs: Long = 45_000): HarvestResult {
         candidates.clear()
         sawFragment = false
         sawPlaying = false
         lastActivityMs = 0
+        capturedSubs = emptyList()
         pageHost = android.net.Uri.parse(url).host ?: ""
 
         return withContext(Dispatchers.Main) {
@@ -107,11 +122,11 @@ class WebViewHarvester(private val context: Context) {
                     ensureActive()
                     delay(250)
                 }
-                candidates.toList()
+                HarvestResult(candidates.toList(), capturedSubs)
             } catch (t: Throwable) {
                 if (t is kotlinx.coroutines.CancellationException) throw t
                 AppLog.e("Harvest", "failed: ${t.message}")
-                candidates.toList()
+                HarvestResult(candidates.toList(), capturedSubs)
             } finally {
                 destroyWebView()
             }
@@ -142,6 +157,47 @@ class WebViewHarvester(private val context: Context) {
                 val blocked = host != pageHost
                 if (blocked) AppLog.d("Harvest", "blocked navigation to $host")
                 return blocked
+            }
+
+            /**
+             * The page itself fetches its subtitle listing from `{origin}/wyzie`.
+             * We proxy that request through our own HTTP stack so we can keep a
+             * copy of the JSON - this captures the exact subtitles the provider's
+             * own player would offer, with the page's session context.
+             */
+            override fun shouldInterceptRequest(view: WebView, request: WebResourceRequest): WebResourceResponse? {
+                val url = request.url
+                val host = url.host ?: return null
+                val path = url.encodedPath ?: ""
+                if (host != pageHost || !path.startsWith("/wyzie")) return null
+                return try {
+                    val origin = "https://$pageHost"
+                    val req = okhttp3.Request.Builder()
+                        .url(url.toString())
+                        .header("User-Agent", Net.UA)
+                        .header("Referer", "$origin/")
+                        .header("Accept", "application/json")
+                        .build()
+                    Net.client.newCall(req).execute().use { resp ->
+                        if (!resp.isSuccessful) return null
+                        val body = resp.body?.string() ?: return null
+                        runCatching {
+                            val subs = Net.json.decodeFromString(
+                                ListSerializer(Wyzie.Sub.serializer()), body,
+                            ).filter { it.url.isNotBlank() }
+                            if (subs.isNotEmpty()) {
+                                capturedSubs = subs
+                                AppLog.d("Harvest", "captured ${subs.size} subtitle track(s) from page")
+                            }
+                        }
+                        WebResourceResponse(
+                            "application/json", "utf-8", ByteArrayInputStream(body.toByteArray()),
+                        )
+                    }
+                } catch (t: Throwable) {
+                    AppLog.d("Harvest", "wyzie proxy failed: ${t.message?.take(60)}")
+                    null
+                }
             }
 
             override fun onPageStarted(view: WebView, url: String, favicon: Bitmap?) {

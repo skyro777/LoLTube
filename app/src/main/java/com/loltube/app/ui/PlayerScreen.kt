@@ -7,6 +7,7 @@ import android.content.pm.ActivityInfo
 import android.media.AudioManager
 import android.os.Build
 import android.view.View
+import android.view.ViewTreeObserver
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
@@ -17,6 +18,7 @@ import androidx.compose.foundation.focusable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -26,11 +28,15 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.AspectRatio
@@ -41,6 +47,7 @@ import androidx.compose.material.icons.filled.FastForward
 import androidx.compose.material.icons.filled.FastRewind
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.PlaylistPlay
 import androidx.compose.material.icons.filled.QueryStats
 import androidx.compose.material.icons.filled.Subtitles
 import androidx.compose.material.icons.filled.SwapHoriz
@@ -84,12 +91,17 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.media3.common.VideoSize
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
@@ -99,6 +111,7 @@ import com.loltube.app.providers.PlaybackRequest
 import com.loltube.app.providers.ProviderId
 import com.loltube.app.providers.Providers
 import com.loltube.app.player.PlayerViewModel
+import com.loltube.app.util.AppLog
 import com.loltube.app.util.Format
 import com.loltube.app.util.TvHelper
 import kotlin.math.abs
@@ -172,31 +185,61 @@ fun PlayerScreen(
     val durationMsNow = rememberUpdatedState(durationMs)
 
     // ---------------- immersive fullscreen + auto landscape ----------------
+    // Bars are re-hidden EVERY time the window regains focus or the activity
+    // resumes: on API < R (Android 9/10) the immersive flags are cleared by the
+    // system each time the window loses focus (pause, recents, dialogs), which
+    // is why the status bar used to come back after minimizing.
+    val lifecycleOwner = LocalLifecycleOwner.current
     DisposableEffect(Unit) {
         val window = activity?.window
         val controller = window?.let { WindowCompat.getInsetsController(it, view) }
         var initialBrightness = Float.MIN_VALUE
+
+        fun applyImmersive() {
+            try {
+                controller?.systemBarsBehavior =
+                    WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+                controller?.hide(WindowInsetsCompat.Type.systemBars())
+                if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
+                    @Suppress("DEPRECATION")
+                    view.systemUiVisibility = (
+                        View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
+                            or View.SYSTEM_UI_FLAG_FULLSCREEN
+                            or View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
+                            or View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+                            or View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
+                            or View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
+                        )
+                }
+            } catch (t: Throwable) {
+                AppLog.d("Immersive", "re-apply failed: ${t.message}")
+            }
+        }
 
         if (window != null) {
             // Draw edge-to-edge: the video surface then covers the ENTIRE window,
             // including the strip under the status bar (which we also hide).
             WindowCompat.setDecorFitsSystemWindows(window, false)
             initialBrightness = window.attributes.screenBrightness
-            controller?.systemBarsBehavior =
-                WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
-            controller?.hide(WindowInsetsCompat.Type.systemBars())
-            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
                 @Suppress("DEPRECATION")
-                view.systemUiVisibility = (
-                    View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
-                        or View.SYSTEM_UI_FLAG_FULLSCREEN
-                        or View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
-                        or View.SYSTEM_UI_FLAG_LAYOUT_STABLE
-                        or View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
-                        or View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
-                    )
+                window.attributes = window.attributes.apply {
+                    layoutInDisplayCutoutMode =
+                        android.view.WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+                }
             }
         }
+        applyImmersive()
+
+        val focusListener = ViewTreeObserver.OnWindowFocusChangeListener { hasFocus ->
+            if (hasFocus) applyImmersive()
+        }
+        view.viewTreeObserver.addOnWindowFocusChangeListener(focusListener)
+
+        val lifecycleObserver = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) applyImmersive()
+        }
+        lifecycleOwner.lifecycle.addObserver(lifecycleObserver)
 
         // Rotate into landscape on touch devices; TVs are always landscape already.
         val prevOrientation = activity?.requestedOrientation
@@ -205,6 +248,8 @@ fun PlayerScreen(
         }
 
         onDispose {
+            view.viewTreeObserver.removeOnWindowFocusChangeListener(focusListener)
+            lifecycleOwner.lifecycle.removeObserver(lifecycleObserver)
             controller?.show(WindowInsetsCompat.Type.systemBars())
             if (window != null) {
                 WindowCompat.setDecorFitsSystemWindows(window, true)
@@ -495,7 +540,14 @@ fun PlayerScreen(
                 },
                 update = { pv ->
                     pv.player = player
-                    pv.resizeMode = resizeModeFor(aspectMode, videoSize, screenAspect)
+                    // The base layout is always FIT (surface exactly matches the
+                    // video aspect); the fill/zoom modes are enforced with an exact
+                    // scale transform on the video surface view itself - that works
+                    // on every device and codec (some codecs ignore the resize-mode
+                    // surface scaling, which is why the old modes did nothing on
+                    // some videos).
+                    pv.resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT
+                    applyAspectTransform(pv, aspectMode, videoSize, screenAspect)
                 },
                 modifier = Modifier.fillMaxSize(),
             )
@@ -915,6 +967,78 @@ fun PlayerScreen(
                         }
                     }
 
+                    // episodes (jump between episodes of the current show)
+                    val seriesDetails = details
+                    if (seriesDetails != null && seriesDetails.type == "series" && seriesDetails.episodes.isNotEmpty()) {
+                        Box {
+                            MenuButton(
+                                icon = { Icon(Icons.Filled.PlaylistPlay, null, tint = Color.White) },
+                                label = "Episodes",
+                                open = openMenu == "episodes",
+                                onClick = { openMenu = if (openMenu == "episodes") null else "episodes" },
+                            )
+                            DropdownMenu(expanded = openMenu == "episodes", onDismissRequest = { openMenu = null }) {
+                                var seasonPick by remember(activeReq.season) {
+                                    mutableStateOf(activeReq.season ?: seriesDetails.seasons.firstOrNull { it > 0 } ?: 1)
+                                }
+                                // season chips
+                                Row(
+                                    Modifier
+                                        .padding(horizontal = 8.dp, vertical = 4.dp)
+                                        .horizontalScroll(rememberScrollState()),
+                                ) {
+                                    seriesDetails.seasons.forEach { s ->
+                                        val sel = s == seasonPick
+                                        Surface(
+                                            color = if (sel) MaterialTheme.colorScheme.primary else Color(0x22000000),
+                                            contentColor = if (sel) MaterialTheme.colorScheme.onPrimary else Color.White,
+                                            shape = RoundedCornerShape(8.dp),
+                                            modifier = Modifier
+                                                .padding(end = 6.dp)
+                                                .clickable { seasonPick = s },
+                                        ) {
+                                            Text(
+                                                if (s == 0) "Specials" else "S$s",
+                                                style = MaterialTheme.typography.labelMedium,
+                                                fontWeight = if (sel) FontWeight.Bold else FontWeight.SemiBold,
+                                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
+                                            )
+                                        }
+                                    }
+                                }
+                                val eps = remember(seasonPick) {
+                                    seriesDetails.episodes.filter { it.season == seasonPick }.sortedBy { it.number }
+                                }
+                                Box(
+                                    Modifier
+                                        .heightIn(max = 400.dp)
+                                        .widthIn(min = 240.dp, max = 360.dp)
+                                        .verticalScroll(rememberScrollState()),
+                                ) {
+                                    Column {
+                                        eps.forEach { ep ->
+                                            val current = ep.season == activeReq.season && ep.number == activeReq.episode
+                                            DropdownMenuItem(
+                                                text = {
+                                                    Text(
+                                                        "E${ep.number} · ${ep.name}" + (if (current) "   ✓" else ""),
+                                                        maxLines = 1,
+                                                        overflow = TextOverflow.Ellipsis,
+                                                        fontWeight = if (current) FontWeight.Bold else FontWeight.Normal,
+                                                    )
+                                                },
+                                                onClick = {
+                                                    vm.switchEpisode(ep.season, ep.number)
+                                                    openMenu = null
+                                                },
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
                     // audio
                     if (audioLanguages.size > 1) {
                         Box {
@@ -1011,8 +1135,8 @@ private fun aspectShort(m: AspectMode): String = when (m) {
 }
 
 private fun qualityShort(m: QualityMode): String = when (m) {
-    QualityMode.AUTO_4K -> "Auto"
-    QualityMode.FORCE_MAX -> "4K Lock"
+    QualityMode.AUTO -> "Auto"
+    QualityMode.MAX -> "4K"
     QualityMode.CAP_1080 -> "1080p"
     QualityMode.CAP_720 -> "720p"
 }
@@ -1022,19 +1146,55 @@ private fun fallbackEmbed(request: PlaybackRequest): String? =
         Providers.embedUrl(id, request)
     }
 
-private fun resizeModeFor(mode: AspectMode, videoSize: androidx.media3.common.VideoSize?, screenAspect: Float): Int {
-    val videoAspect = videoSize?.takeIf { it.height > 0 && it.width > 0 }
-        ?.let { it.width * it.pixelWidthHeightRatio / it.height }
-    return when (mode) {
-        AspectMode.FIT -> AspectRatioFrameLayout.RESIZE_MODE_FIT
-        AspectMode.FILL -> AspectRatioFrameLayout.RESIZE_MODE_FILL
-        AspectMode.ZOOM -> AspectRatioFrameLayout.RESIZE_MODE_ZOOM
-        AspectMode.AUTO ->
-            if (videoAspect == null || screenAspect <= 0f) AspectRatioFrameLayout.RESIZE_MODE_FIT
-            else if (abs(videoAspect - screenAspect) / screenAspect > 0.02f)
-                AspectRatioFrameLayout.RESIZE_MODE_FILL
-            else AspectRatioFrameLayout.RESIZE_MODE_FIT
+/**
+ * Enforces the aspect mode by scaling the *video surface view* (not the whole
+ * PlayerView, so subtitles stay undistorted). Runs on every recomposition
+ * (position ticks every 400ms), so it also follows resolution changes.
+ *
+ *  - AUTO / FILL: non-uniform stretch so the video covers the whole screen
+ *    (no black bars anywhere). AUTO leaves near-matching videos untouched.
+ *  - ZOOM: uniform scale up + crop (covers, keeps proportions).
+ *  - FIT: reset.
+ */
+private fun applyAspectTransform(
+    pv: PlayerView,
+    mode: AspectMode,
+    videoSize: VideoSize?,
+    screenAspect: Float,
+) {
+    if (screenAspect <= 0f) return
+    val videoAspect = videoSize
+        ?.takeIf { it.height > 0 && it.width > 0 }
+        ?.let { (it.width * it.pixelWidthHeightRatio) / it.height }
+        ?: (16f / 9f) // sensible default until the size is reported
+
+    var scaleX = 1f
+    var scaleY = 1f
+    when (mode) {
+        AspectMode.FIT -> Unit
+
+        AspectMode.FILL, AspectMode.AUTO -> {
+            val rel = videoAspect / screenAspect // >1: video wider than screen
+            if (rel > 1f) {
+                scaleY = rel
+            } else if (rel < 1f) {
+                scaleX = 1f / rel
+            }
+            if (mode == AspectMode.AUTO && abs(rel - 1f) < 0.02f) {
+                scaleX = 1f; scaleY = 1f
+            }
+        }
+
+        AspectMode.ZOOM -> {
+            val s = maxOf(videoAspect / screenAspect, screenAspect / videoAspect)
+            scaleX = s
+            scaleY = s
+        }
     }
+
+    val target = runCatching { pv.videoSurfaceView }.getOrNull() ?: pv
+    target.scaleX = scaleX
+    target.scaleY = scaleY
 }
 
 @Composable
