@@ -1,0 +1,23 @@
+# Gradle
+.gradle/
+build/
+app/build/
+
+# IDE
+.idea/
+*.iml
+.kotlin/
+
+# Local config
+local.properties
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs / captures
+*.log
+captures/
+
+# Do NOT ignore keystore/ - the release keystore is intentionally committed
+# so CI can produce consistently-signed installable APKs (personal project).

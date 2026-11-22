@@ -1,0 +1,742 @@
+package com.loltube.app.ui
+
+import android.app.Activity
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.focusable
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.AspectRatio
+import androidx.compose.material.icons.filled.Audiotrack
+import androidx.compose.material.icons.filled.Bolt
+import androidx.compose.material.icons.filled.FastForward
+import androidx.compose.material.icons.filled.FastRewind
+import androidx.compose.material.icons.filled.Pause
+import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.QueryStats
+import androidx.compose.material.icons.filled.Subtitles
+import androidx.compose.material.icons.filled.SwapHoriz
+import androidx.compose.material3.Button
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.Slider
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.nativeKeyCode
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.compose.ui.viewinterop.AndroidView
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
+import androidx.media3.common.Player
+import androidx.media3.common.util.UnstableApi
+import androidx.media3.ui.AspectRatioFrameLayout
+import androidx.media3.ui.PlayerView
+import com.loltube.app.data.AspectMode
+import com.loltube.app.data.QualityMode
+import com.loltube.app.providers.PlaybackRequest
+import com.loltube.app.providers.ProviderId
+import com.loltube.app.providers.Providers
+import com.loltube.app.player.PlayerViewModel
+import com.loltube.app.util.Format
+import com.loltube.app.util.TvHelper
+import kotlin.math.abs
+
+@UnstableApi
+@Composable
+fun PlayerScreen(
+    vm: PlayerViewModel,
+    request: PlaybackRequest,
+    onBack: () -> Unit,
+    onOpenWebView: (String) -> Unit,
+) {
+    val phase by vm.phase.collectAsState()
+    val player by vm.player.collectAsState()
+    val isPlaying by vm.isPlaying.collectAsState()
+    val buffering by vm.buffering.collectAsState()
+    val positionMs by vm.positionMs.collectAsState()
+    val durationMs by vm.durationMs.collectAsState()
+    val videoSize by vm.videoSize.collectAsState()
+    val qualityMode by vm.qualityMode.collectAsState()
+    val aspectMode by vm.aspectMode.collectAsState()
+    val message by vm.message.collectAsState()
+    val subs by vm.subs.collectAsState()
+    val activeSubLabel by vm.activeSubLabel.collectAsState()
+    val audioLanguages by vm.audioLanguages.collectAsState()
+    val activeAudio by vm.activeAudio.collectAsState()
+    val stats by vm.stats.collectAsState()
+    val pendingNext by vm.pendingNext.collectAsState()
+    val details by vm.details.collectAsState()
+
+    var controlsVisible by remember { mutableStateOf(true) }
+    var statsVisible by remember { mutableStateOf(false) }
+    var seekFlash by remember { mutableStateOf<String?>(null) }
+    var openMenu by remember { mutableStateOf<String?>(null) }
+
+    val view = LocalView.current
+    val isTv = remember { TvHelper.isTv(view.context) }
+    val rootFocus = remember { FocusRequester() }
+
+    // immersive mode
+    DisposableEffect(Unit) {
+        val window = (view.context as? Activity)?.window
+        val controller = window?.let { WindowCompat.getInsetsController(it, view) }
+        controller?.systemBarsBehavior =
+            WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+        controller?.hide(WindowInsetsCompat.Type.systemBars())
+        onDispose {
+            controller?.show(WindowInsetsCompat.Type.systemBars())
+            view.keepScreenOn = false
+        }
+    }
+
+    // keep screen on while playing
+    LaunchedEffect(isPlaying, buffering) {
+        view.keepScreenOn = isPlaying || buffering
+    }
+
+    // focus the root so TV remote keys reach us even when controls are hidden
+    LaunchedEffect(controlsVisible) {
+        if (!controlsVisible) rootFocus.requestFocus()
+    }
+    LaunchedEffect(Unit) { rootFocus.requestFocus() }
+
+    // save progress when leaving
+    DisposableEffect(Unit) {
+        onDispose { vm.saveProgress() }
+    }
+
+    // message auto-dismiss
+    LaunchedEffect(message) {
+        if (message != null) {
+            kotlinx.coroutines.delay(3500)
+            vm.consumeMessage()
+        }
+    }
+
+    // seek flash auto-clear
+    LaunchedEffect(seekFlash) {
+        if (seekFlash != null) {
+            kotlinx.coroutines.delay(800)
+            seekFlash = null
+        }
+    }
+
+    fun showControls() {
+        controlsVisible = true
+    }
+
+    fun handleSeek(delta: Long) {
+        vm.seekDelta(delta)
+        seekFlash = (if (delta > 0) "+${delta / 1000}s" else "${delta / 1000}s")
+    }
+
+    androidx.activity.compose.BackHandler {
+        vm.saveProgress()
+        onBack()
+    }
+
+    Box(
+        Modifier
+            .fillMaxSize()
+            .background(Color.Black)
+            .focusRequester(rootFocus)
+            .focusable()
+            .onPreviewKeyEvent { event ->
+                if (event.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
+                when (event.key.nativeKeyCode) {
+                    android.view.KeyEvent.KEYCODE_DPAD_CENTER,
+                    android.view.KeyEvent.KEYCODE_ENTER -> {
+                        if (!controlsVisible) {
+                            showControls()
+                            true
+                        } else false
+                    }
+
+                    android.view.KeyEvent.KEYCODE_DPAD_LEFT -> {
+                        if (!controlsVisible) {
+                            handleSeek(-15_000)
+                            showControls()
+                            true
+                        } else false
+                    }
+
+                    android.view.KeyEvent.KEYCODE_DPAD_RIGHT -> {
+                        if (!controlsVisible) {
+                            handleSeek(15_000)
+                            showControls()
+                            true
+                        } else false
+                    }
+
+                    android.view.KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE,
+                    android.view.KeyEvent.KEYCODE_SPACE -> {
+                        vm.togglePlayPause()
+                        true
+                    }
+
+                    android.view.KeyEvent.KEYCODE_MEDIA_FAST_FORWARD -> {
+                        handleSeek(30_000)
+                        true
+                    }
+
+                    android.view.KeyEvent.KEYCODE_MEDIA_REWIND -> {
+                        handleSeek(-30_000)
+                        true
+                    }
+
+                    else -> false
+                }
+            }
+            .pointerInput(Unit) {
+                detectTapGestures(
+                    onTap = { controlsVisible = !controlsVisible },
+                    onDoubleTap = { vm.togglePlayPause() },
+                )
+            },
+    ) {
+        // ---------------- video surface ----------------
+        androidx.compose.foundation.layout.BoxWithConstraints(Modifier.fillMaxSize()) {
+            val screenAspect = maxWidth.value / maxHeight.value.coerceAtLeast(1f)
+            AndroidView(
+                factory = { ctx ->
+                    PlayerView(ctx).apply {
+                        useController = false
+                        setShutterBackgroundColor(android.graphics.Color.BLACK)
+                    }
+                },
+                update = { pv ->
+                    pv.player = player
+                    pv.resizeMode = resizeModeFor(aspectMode, videoSize, screenAspect)
+                },
+                modifier = Modifier.fillMaxSize(),
+            )
+        }
+
+        // ---------------- resolving / failed overlays ----------------
+        when (val ph = phase) {
+            is PlayerViewModel.Phase.LoadingMeta -> CenterNote("Loading title info…")
+            is PlayerViewModel.Phase.Resolving -> {
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    modifier = Modifier.align(Alignment.Center),
+                ) {
+                    CircularProgressIndicator(
+                        color = MaterialTheme.colorScheme.primary,
+                        strokeWidth = 4.dp,
+                        modifier = Modifier.size(52.dp),
+                    )
+                    Spacer(Modifier.height(18.dp))
+                    Text(
+                        "Resolving via ${ph.provider}",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold,
+                    )
+                    Spacer(Modifier.height(6.dp))
+                    Text(
+                        ph.status,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        textAlign = TextAlign.Center,
+                    )
+                    Text(
+                        "stream hunting runs the site's own player in the background",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(top = 10.dp),
+                    )
+                }
+            }
+
+            is PlayerViewModel.Phase.Failed -> {
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    modifier = Modifier
+                        .align(Alignment.Center)
+                        .padding(28.dp),
+                ) {
+                    Text(
+                        "Couldn't get a stream",
+                        style = MaterialTheme.typography.titleLarge,
+                        fontWeight = FontWeight.Bold,
+                    )
+                    Spacer(Modifier.height(10.dp))
+                    Text(
+                        ph.errors,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        textAlign = TextAlign.Center,
+                    )
+                    Spacer(Modifier.height(20.dp))
+                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        OutlinedButton(onClick = { vm.retry(null) }) { Text("Retry") }
+                        val fb = fallbackEmbed(request)
+                        if (fb != null) {
+                            Button(onClick = { onOpenWebView(fb) }) { Text("Open in WebView") }
+                        }
+                    }
+                    Spacer(Modifier.height(10.dp))
+                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        ProviderId.entries.forEach { p ->
+                            OutlinedButton(onClick = { vm.retry(p) }) { Text(p.label) }
+                        }
+                    }
+                }
+            }
+
+            else -> Unit
+        }
+
+        // ---------------- center buffering spinner ----------------
+        if (phase is PlayerViewModel.Phase.Ready && buffering) {
+            CircularProgressIndicator(
+                color = MaterialTheme.colorScheme.primary,
+                strokeWidth = 4.dp,
+                modifier = Modifier
+                    .align(Alignment.Center)
+                    .size(56.dp),
+            )
+        }
+
+        // ---------------- seek flash ----------------
+        seekFlash?.let { flash ->
+            Surface(
+                color = Color(0xB3000000),
+                shape = RoundedCornerShape(10.dp),
+                modifier = Modifier.align(Alignment.Center),
+            ) {
+                Text(
+                    flash,
+                    fontSize = 26.sp,
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier.padding(horizontal = 22.dp, vertical = 10.dp),
+                )
+            }
+        }
+
+        // ---------------- floating message ----------------
+        message?.let { msg ->
+            Surface(
+                color = Color(0xE6222222),
+                shape = RoundedCornerShape(10.dp),
+                modifier = Modifier
+                    .align(Alignment.TopCenter)
+                    .padding(top = 70.dp),
+            ) {
+                Text(
+                    msg,
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 9.dp),
+                    color = Color.White,
+                )
+            }
+        }
+
+        // ---------------- next episode overlay ----------------
+        pendingNext?.let { next ->
+            Surface(
+                color = Color(0xF2101014),
+                shape = RoundedCornerShape(14.dp),
+                modifier = Modifier
+                    .align(Alignment.Center)
+                    .padding(28.dp),
+            ) {
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    modifier = Modifier.padding(22.dp),
+                ) {
+                    Text("Up next", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
+                    Spacer(Modifier.height(6.dp))
+                    Text(
+                        "S${next.season} E${next.episode} · ${next.name}",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold,
+                        textAlign = TextAlign.Center,
+                    )
+                    Spacer(Modifier.height(6.dp))
+                    Text("in ${next.countdown}s", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Spacer(Modifier.height(14.dp))
+                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        OutlinedButton(onClick = { vm.cancelNext() }) { Text("Cancel") }
+                        Button(onClick = { vm.playNextNow() }) { Text("Play now") }
+                    }
+                }
+            }
+        }
+
+        // ---------------- controls ----------------
+        if (controlsVisible && phase is PlayerViewModel.Phase.Ready) {
+            // auto-hide while playing
+            LaunchedEffect(isPlaying, openMenu) {
+                if (isPlaying && openMenu == null) {
+                    kotlinx.coroutines.delay(4500)
+                    controlsVisible = false
+                }
+            }
+
+            Column(
+                Modifier
+                    .fillMaxSize()
+                    .background(
+                        Brush.verticalGradient(
+                            0f to Color(0xB3000000),
+                            0.12f to Color.Transparent,
+                            0.82f to Color.Transparent,
+                            1f to Color(0xCC000000),
+                        )
+                    ),
+            ) {
+                // top bar
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 8.dp, vertical = 6.dp),
+                ) {
+                    IconButton(onClick = { vm.saveProgress(); onBack() }) {
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back", tint = Color.White)
+                    }
+                    Column(Modifier.weight(1f)) {
+                        Text(
+                            details?.name ?: request.title,
+                            color = Color.White,
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.Bold,
+                            maxLines = 1,
+                        )
+                        val epInfo = request.season?.let { s ->
+                            request.episode?.let { e -> "S$s E$e · ${(vm.details.value?.episodes?.firstOrNull { it.season == s && it.number == e }?.name ?: "")}" }
+                        }
+                        if (epInfo != null) {
+                            Text(
+                                epInfo,
+                                color = Color(0xFFBBBBCC),
+                                style = MaterialTheme.typography.bodySmall,
+                                maxLines = 1,
+                            )
+                        }
+                    }
+                    val readyPhase = phase as PlayerViewModel.Phase.Ready
+                    Badge("${readyPhase.provider.label}")
+                    Spacer(Modifier.width(8.dp))
+                    if (stats.videoHeight > 0) {
+                        val res = if (stats.videoHeight >= 2000) "4K ${stats.videoHeight}p" else "${stats.videoHeight}p"
+                        Badge(res, highlight = stats.videoHeight >= 2000)
+                    }
+                }
+
+                Spacer(Modifier.weight(1f))
+
+                // stats panel
+                if (statsVisible) {
+                    Surface(
+                        color = Color(0xCC101014),
+                        shape = RoundedCornerShape(10.dp),
+                        modifier = Modifier
+                            .align(Alignment.Start)
+                            .padding(horizontal = 20.dp),
+                    ) {
+                        Column(Modifier.padding(12.dp)) {
+                            val readyPhase = phase as PlayerViewModel.Phase.Ready
+                            StatLine("provider", readyPhase.provider.label)
+                            StatLine("stream", readyPhase.streamKind)
+                            StatLine("quality", "${stats.videoHeight}p @ ${Format.bitrate(stats.videoBitrate)}")
+                            StatLine("dropped frames", "${stats.droppedFrames}")
+                            StatLine("rebuffers (60s)", "${stats.rebuffers}")
+                            StatLine("buffer ahead", Format.time((vm.bufferedMs.value - positionMs).coerceAtLeast(0)))
+                        }
+                    }
+                    Spacer(Modifier.height(10.dp))
+                }
+
+                // seek bar
+                var dragging by remember { mutableStateOf(false) }
+                var dragPos by remember { mutableStateOf(0f) }
+                Column(Modifier.padding(horizontal = 20.dp)) {
+                    Row(Modifier.fillMaxWidth()) {
+                        Text(Format.time(if (dragging) dragPos.toLong() else positionMs), color = Color.White, fontSize = 12.sp)
+                        Spacer(Modifier.weight(1f))
+                        Text(Format.time(durationMs), color = Color(0xFFBBBBCC), fontSize = 12.sp)
+                    }
+                    Slider(
+                        value = (if (dragging) dragPos else positionMs.toFloat())
+                            .coerceIn(0f, durationMs.toFloat().coerceAtLeast(1f)),
+                        onValueChange = { dragging = true; dragPos = it },
+                        onValueChangeFinished = {
+                            vm.seekTo(dragPos.toLong())
+                            dragging = false
+                        },
+                        valueRange = 0f..durationMs.toFloat().coerceAtLeast(1f),
+                    )
+                }
+
+                // button row
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(if (isTv) 8.dp else 4.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 14.dp, vertical = 4.dp)
+                        .padding(bottom = 10.dp),
+                ) {
+                    Spacer(Modifier.weight(1f))
+                    IconButton(onClick = { vm.seekDelta(-15_000) }) {
+                        Icon(Icons.Filled.FastRewind, "Rewind 15s", tint = Color.White, modifier = Modifier.size(30.dp))
+                    }
+                    IconButton(
+                        onClick = { vm.togglePlayPause() },
+                        modifier = Modifier
+                            .size(62.dp)
+                            .background(MaterialTheme.colorScheme.primary, androidx.compose.foundation.shape.CircleShape),
+                    ) {
+                        Icon(
+                            if (isPlaying) Icons.Filled.Pause else Icons.Filled.PlayArrow,
+                            if (isPlaying) "Pause" else "Play",
+                            tint = MaterialTheme.colorScheme.onPrimary,
+                            modifier = Modifier.size(34.dp),
+                        )
+                    }
+                    IconButton(onClick = { vm.seekDelta(15_000) }) {
+                        Icon(Icons.Filled.FastForward, "Forward 15s", tint = Color.White, modifier = Modifier.size(30.dp))
+                    }
+                    Spacer(Modifier.weight(1f))
+
+                    // subtitles
+                    Box {
+                        MenuButton(
+                            icon = { Icon(Icons.Filled.Subtitles, null, tint = Color.White) },
+                            label = activeSubLabel?.take(7) ?: "Subs",
+                            open = openMenu == "subs",
+                            onClick = { openMenu = if (openMenu == "subs") null else "subs" },
+                        )
+                        DropdownMenu(expanded = openMenu == "subs", onDismissRequest = { openMenu = null }) {
+                            DropdownMenuItem(text = { Text("Off") }, onClick = { vm.selectSubtitle(null); openMenu = null })
+                            subs.forEach { s ->
+                                DropdownMenuItem(
+                                    text = { Text(s.display + (s.language?.let { "  ($it)" } ?: "")) },
+                                    onClick = { vm.selectSubtitle(s); openMenu = null },
+                                )
+                            }
+                        }
+                    }
+
+                    // audio
+                    if (audioLanguages.size > 1) {
+                        Box {
+                            MenuButton(
+                                icon = { Icon(Icons.Filled.Audiotrack, null, tint = Color.White) },
+                                label = activeAudio ?: "Audio",
+                                open = openMenu == "audio",
+                                onClick = { openMenu = if (openMenu == "audio") null else "audio" },
+                            )
+                            DropdownMenu(expanded = openMenu == "audio", onDismissRequest = { openMenu = null }) {
+                                audioLanguages.forEach { lang ->
+                                    DropdownMenuItem(
+                                        text = { Text(lang) },
+                                        onClick = { vm.selectAudio(lang); openMenu = null },
+                                    )
+                                }
+                            }
+                        }
+                    }
+
+                    // aspect
+                    Box {
+                        MenuButton(
+                            icon = { Icon(Icons.Filled.AspectRatio, null, tint = Color.White) },
+                            label = aspectShort(aspectMode),
+                            open = openMenu == "aspect",
+                            onClick = { openMenu = if (openMenu == "aspect") null else "aspect" },
+                        )
+                        DropdownMenu(expanded = openMenu == "aspect", onDismissRequest = { openMenu = null }) {
+                            AspectMode.entries.forEach { m ->
+                                DropdownMenuItem(
+                                    text = { Text(m.label) },
+                                    onClick = { vm.setAspect(m); openMenu = null },
+                                )
+                            }
+                        }
+                    }
+
+                    // quality
+                    Box {
+                        MenuButton(
+                            icon = { Icon(Icons.Filled.Bolt, null, tint = Color.White) },
+                            label = qualityShort(qualityMode),
+                            open = openMenu == "quality",
+                            onClick = { openMenu = if (openMenu == "quality") null else "quality" },
+                        )
+                        DropdownMenu(expanded = openMenu == "quality", onDismissRequest = { openMenu = null }) {
+                            QualityMode.entries.forEach { m ->
+                                DropdownMenuItem(
+                                    text = { Text(m.label) },
+                                    onClick = { vm.setQuality(m); openMenu = null },
+                                )
+                            }
+                        }
+                    }
+
+                    // provider switch
+                    Box {
+                        MenuButton(
+                            icon = { Icon(Icons.Filled.SwapHoriz, null, tint = Color.White) },
+                            label = "Source",
+                            open = openMenu == "provider",
+                            onClick = { openMenu = if (openMenu == "provider") null else "provider" },
+                        )
+                        DropdownMenu(expanded = openMenu == "provider", onDismissRequest = { openMenu = null }) {
+                            ProviderId.entries.forEach { p ->
+                                DropdownMenuItem(
+                                    text = { Text("Switch to ${p.label}") },
+                                    onClick = { vm.retry(p); openMenu = null },
+                                )
+                            }
+                        }
+                    }
+
+                    // stats
+                    IconButton(onClick = { statsVisible = !statsVisible }) {
+                        Icon(
+                            Icons.Filled.QueryStats,
+                            if (statsVisible) "Hide stats" else "Show stats",
+                            tint = if (statsVisible) MaterialTheme.colorScheme.primary else Color.White,
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+private fun aspectShort(m: AspectMode): String = when (m) {
+    AspectMode.AUTO -> "Auto"
+    AspectMode.FIT -> "Fit"
+    AspectMode.FILL -> "Stretch"
+    AspectMode.ZOOM -> "Zoom"
+}
+
+private fun qualityShort(m: QualityMode): String = when (m) {
+    QualityMode.AUTO_4K -> "Auto"
+    QualityMode.FORCE_MAX -> "4K Lock"
+    QualityMode.CAP_1080 -> "1080p"
+    QualityMode.CAP_720 -> "720p"
+}
+
+private fun fallbackEmbed(request: PlaybackRequest): String? =
+    ProviderId.entries.firstNotNullOfOrNull { id ->
+        Providers.embedUrl(id, request)
+    }
+
+private fun resizeModeFor(mode: AspectMode, videoSize: androidx.media3.common.VideoSize?, screenAspect: Float): Int {
+    val videoAspect = videoSize?.takeIf { it.height > 0 && it.width > 0 }
+        ?.let { it.width * it.pixelWidthHeightRatio / it.height }
+    return when (mode) {
+        AspectMode.FIT -> AspectRatioFrameLayout.RESIZE_MODE_FIT
+        AspectMode.FILL -> AspectRatioFrameLayout.RESIZE_MODE_FILL
+        AspectMode.ZOOM -> AspectRatioFrameLayout.RESIZE_MODE_ZOOM
+        AspectMode.AUTO ->
+            if (videoAspect == null || screenAspect <= 0f) AspectRatioFrameLayout.RESIZE_MODE_FIT
+            else if (abs(videoAspect - screenAspect) / screenAspect > 0.02f)
+                AspectRatioFrameLayout.RESIZE_MODE_FILL
+            else AspectRatioFrameLayout.RESIZE_MODE_FIT
+    }
+}
+
+@Composable
+private fun Badge(text: String, highlight: Boolean = false) {
+    Surface(
+        color = if (highlight) MaterialTheme.colorScheme.primary else Color(0x88000000),
+        contentColor = if (highlight) MaterialTheme.colorScheme.onPrimary else Color.White,
+        shape = RoundedCornerShape(6.dp),
+    ) {
+        Text(
+            text,
+            fontSize = 11.sp,
+            fontWeight = FontWeight.Bold,
+            modifier = Modifier.padding(horizontal = 7.dp, vertical = 3.dp),
+        )
+    }
+}
+
+@Composable
+private fun StatLine(label: String, value: String) {
+    Row {
+        Text(
+            "$label: ",
+            fontSize = 12.sp,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Text(value, fontSize = 12.sp, color = Color.White, fontWeight = FontWeight.Bold)
+    }
+}
+
+@Composable
+private fun MenuButton(
+    icon: @Composable () -> Unit,
+    label: String,
+    open: Boolean,
+    onClick: () -> Unit,
+) {
+    Surface(
+        color = if (open) Color(0x40FFB300) else Color(0x33000000),
+        contentColor = Color.White,
+        shape = RoundedCornerShape(8.dp),
+        modifier = Modifier.clickable(onClick = onClick),
+    ) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier.padding(horizontal = 9.dp, vertical = 5.dp),
+        ) {
+            icon()
+            Spacer(Modifier.width(5.dp))
+            Text(label, fontSize = 12.sp, maxLines = 1)
+        }
+    }
+}
+
+@Composable
+private fun CenterNote(text: String) {
+    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+        Text(text, color = MaterialTheme.colorScheme.onSurfaceVariant)
+    }
+}
