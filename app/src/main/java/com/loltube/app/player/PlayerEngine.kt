@@ -16,6 +16,7 @@ import androidx.media3.exoplayer.mediacodec.MediaCodecSelector
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.exoplayer.trackselection.AdaptiveTrackSelection
 import androidx.media3.exoplayer.trackselection.DefaultTrackSelector
+import androidx.media3.exoplayer.upstream.DefaultBandwidthMeter
 import com.loltube.app.data.AppSettings
 import com.loltube.app.data.BufferProfile
 import com.loltube.app.data.QualityMode
@@ -62,15 +63,22 @@ object PlayerEngine {
         )
         val trackSelector = DefaultTrackSelector(context, adaptiveFactory)
 
-        // hardware decoders only, and prefer them in listed order
+        // Hardware decoders only — but ONLY for video: audio decoders are almost always
+        // software ("OMX.google.*") and filtering them out leaves no audio renderer at
+        // all, which produced silent playback on most devices.
         val hwCodecSelector = MediaCodecSelector { mimeType, requiresSecure, requiresTunneling ->
-            MediaCodecSelector.DEFAULT.getDecoderInfos(mimeType, requiresSecure, requiresTunneling)
-                .filter { it.hardwareAccelerated }
+            val infos = MediaCodecSelector.DEFAULT.getDecoderInfos(mimeType, requiresSecure, requiresTunneling)
+            if (mimeType.startsWith("video/")) {
+                val hw = infos.filter { it.hardwareAccelerated }
+                if (hw.isEmpty()) infos else hw // fall back rather than lose video entirely
+            } else {
+                infos
+            }
         }
 
         val renderersFactory = DefaultRenderersFactory(context)
             .setMediaCodecSelector(hwCodecSelector)
-            .setEnableDecoderFallback(false)
+            .setEnableDecoderFallback(true)
             .setExtensionRendererMode(DefaultRenderersFactory.EXTENSION_RENDERER_MODE_OFF)
 
         val okClient = MappleStreamInterceptor.playbackClient(streamHeaders)
@@ -80,10 +88,21 @@ object PlayerEngine {
 
         val mediaSourceFactory = DefaultMediaSourceFactory(dataSourceFactory)
 
+        // Warm-start the ABR with the bandwidth we measured last session so playback
+        // ramps to a sane rendition immediately instead of crawling up from 480p.
+        val bandwidthMeter = if (settings.lastBandwidthBps > 200_000) {
+            DefaultBandwidthMeter.Builder(context)
+                .setInitialBitrateEstimate(settings.lastBandwidthBps)
+                .build()
+        } else {
+            DefaultBandwidthMeter.Builder(context).build()
+        }
+
         val player = ExoPlayer.Builder(context, renderersFactory)
             .setTrackSelector(trackSelector)
             .setLoadControl(loadControl)
             .setMediaSourceFactory(mediaSourceFactory)
+            .setBandwidthMeter(bandwidthMeter)
             .setSeekBackIncrementMs(15_000)
             .setSeekForwardIncrementMs(15_000)
             .build()

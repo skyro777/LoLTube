@@ -30,6 +30,7 @@ class HomeViewModel(app: Application) : AndroidViewModel(app) {
         val searchQuery: String = "",
         val searchResults: List<CatalogEntry> = emptyList(),
         val searching: Boolean = false,
+        val searchError: String? = null,
     )
 
     private val _state = MutableStateFlow(HomeUiState())
@@ -96,17 +97,37 @@ class HomeViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun setQuery(query: String) {
-        _state.value = _state.value.copy(searchQuery = query)
+        _state.value = _state.value.copy(searchQuery = query, searchError = null)
         searchJob?.cancel()
         if (query.trim().length < 2) {
             _state.value = _state.value.copy(searchResults = emptyList(), searching = false)
             return
         }
         searchJob = viewModelScope.launch {
-            kotlinx.coroutines.delay(400)
+            kotlinx.coroutines.delay(350)
             _state.value = _state.value.copy(searching = true)
-            val results = ImdbSuggest.search(query)
-            _state.value = _state.value.copy(searching = false, searchResults = results)
+            val q = query.trim()
+
+            // Primary: Cinemeta search — the same backend that powers the home feeds,
+            // so it works on every network the app already works on.
+            val results = Cinemeta.search(q)
+
+            // Fallback: IMDb suggestion endpoint (different CDN, sometimes blocked).
+            val final = results.ifEmpty {
+                ImdbSuggest.search(q).also {
+                    if (it.isEmpty()) {
+                        AppLog.e("Search", "no results from Cinemeta or IMDb for '$q'")
+                    }
+                }
+            }
+
+            // Ignore stale responses if the user kept typing.
+            if (_state.value.searchQuery.trim() == q) {
+                _state.value = _state.value.copy(
+                    searching = false,
+                    searchResults = final,
+                )
+            }
         }
     }
 }

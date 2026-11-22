@@ -112,7 +112,7 @@ fun HomeScreen(
         }
 
         when {
-            state.tab == 0 && state.searchQuery.trim().length >= 2 -> SearchResults(
+            state.searchQuery.trim().length >= 2 -> SearchResults(
                 state = state,
                 onOpen = onOpenDetails,
             )

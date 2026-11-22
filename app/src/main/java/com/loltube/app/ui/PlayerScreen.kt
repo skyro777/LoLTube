@@ -1,12 +1,25 @@
 package com.loltube.app.ui
 
 import android.app.Activity
+import android.content.ActivityInfo
+import android.content.Context
+import android.content.ContextWrapper
+import android.media.AudioManager
+import android.os.Build
+import android.view.View
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.focusable
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -16,12 +29,14 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.AspectRatio
 import androidx.compose.material.icons.filled.Audiotrack
 import androidx.compose.material.icons.filled.Bolt
+import androidx.compose.material.icons.filled.Brightness7
 import androidx.compose.material.icons.filled.FastForward
 import androidx.compose.material.icons.filled.FastRewind
 import androidx.compose.material.icons.filled.Pause
@@ -29,12 +44,15 @@ import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.QueryStats
 import androidx.compose.material.icons.filled.Subtitles
 import androidx.compose.material.icons.filled.SwapHoriz
+import androidx.compose.material.icons.filled.VolumeOff
+import androidx.compose.material.icons.filled.VolumeUp
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Slider
@@ -47,6 +65,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -61,6 +80,7 @@ import androidx.compose.ui.input.key.nativeKeyCode
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -70,7 +90,6 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
-import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
@@ -83,6 +102,21 @@ import com.loltube.app.player.PlayerViewModel
 import com.loltube.app.util.Format
 import com.loltube.app.util.TvHelper
 import kotlin.math.abs
+import kotlin.math.roundToInt
+
+/** Overlay shown while a touch gesture (brightness / volume / seek) is in progress. */
+private sealed interface GestureIndicator {
+    data class Brightness(val pct: Int) : GestureIndicator
+    data class Volume(val pct: Int) : GestureIndicator
+    data class Seek(val targetMs: Long, val deltaMs: Long) : GestureIndicator
+}
+
+/** Unwrap ContextThemeWrapper chains to the owning Activity. */
+private tailrec fun Context.findActivity(): Activity? = when (this) {
+    is Activity -> this
+    is ContextWrapper -> baseContext.findActivity()
+    else -> null
+}
 
 @UnstableApi
 @Composable
@@ -103,6 +137,7 @@ fun PlayerScreen(
     val aspectMode by vm.aspectMode.collectAsState()
     val message by vm.message.collectAsState()
     val subs by vm.subs.collectAsState()
+    val embeddedTextTracks by vm.embeddedTextTracks.collectAsState()
     val activeSubLabel by vm.activeSubLabel.collectAsState()
     val audioLanguages by vm.audioLanguages.collectAsState()
     val activeAudio by vm.activeAudio.collectAsState()
@@ -116,27 +151,105 @@ fun PlayerScreen(
     var seekFlash by remember { mutableStateOf<String?>(null) }
     var openMenu by remember { mutableStateOf<String?>(null) }
     var lastInteractionMs by remember { mutableStateOf(System.currentTimeMillis()) }
+    var gestureIndicator by remember { mutableStateOf<GestureIndicator?>(null) }
 
     fun interact() {
         lastInteractionMs = System.currentTimeMillis()
         controlsVisible = true
     }
 
+    val context = LocalContext.current
     val view = LocalView.current
-    val isTv = remember { TvHelper.isTv(view.context) }
+    val activity = remember { context.findActivity() }
+    val isTv = remember { TvHelper.isTv(context) }
+    val audioManager = remember { context.getSystemService(Context.AUDIO_SERVICE) as? AudioManager }
     val rootFocus = remember { FocusRequester() }
 
-    // immersive mode
+    // latest values the gesture handler needs without restarting it
+    val controlsVisibleNow = rememberUpdatedState(controlsVisible)
+    val positionMsNow = rememberUpdatedState(positionMs)
+    val durationMsNow = rememberUpdatedState(durationMs)
+
+    // ---------------- immersive fullscreen + auto landscape ----------------
     DisposableEffect(Unit) {
-        val window = (view.context as? Activity)?.window
+        val window = activity?.window
         val controller = window?.let { WindowCompat.getInsetsController(it, view) }
-        controller?.systemBarsBehavior =
-            WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
-        controller?.hide(WindowInsetsCompat.Type.systemBars())
+        var initialBrightness = Float.MIN_VALUE
+
+        if (window != null) {
+            // Draw edge-to-edge: the video surface then covers the ENTIRE window,
+            // including the strip under the status bar (which we also hide).
+            WindowCompat.setDecorFitsSystemWindows(window, false)
+            initialBrightness = window.attributes.screenBrightness
+            controller?.systemBarsBehavior =
+                WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+            controller?.hide(WindowInsetsCompat.Type.systemBars())
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
+                @Suppress("DEPRECATION")
+                view.systemUiVisibility = (
+                    View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
+                        or View.SYSTEM_UI_FLAG_FULLSCREEN
+                        or View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
+                        or View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+                        or View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
+                        or View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
+                    )
+            }
+        }
+
+        // Rotate into landscape on touch devices; TVs are always landscape already.
+        val prevOrientation = activity?.requestedOrientation
+        if (activity != null && !isTv) {
+            activity.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+        }
+
         onDispose {
             controller?.show(WindowInsetsCompat.Type.systemBars())
+            if (window != null) {
+                WindowCompat.setDecorFitsSystemWindows(window, true)
+                if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
+                    @Suppress("DEPRECATION")
+                    view.systemUiVisibility = View.SYSTEM_UI_FLAG_VISIBLE
+                    window.statusBarColor = android.graphics.Color.BLACK
+                    window.navigationBarColor = android.graphics.Color.BLACK
+                }
+                if (initialBrightness >= 0f) {
+                    window.attributes = window.attributes.apply { screenBrightness = initialBrightness }
+                }
+            }
+            if (activity != null && !isTv) {
+                activity.requestedOrientation =
+                    prevOrientation ?: ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+            }
             view.keepScreenOn = false
         }
+    }
+
+    // ---------------- volume helpers ----------------
+    fun volumePercent(): Int {
+        val am = audioManager ?: return -1
+        val max = am.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
+        if (max <= 0) return -1
+        return (am.getStreamVolume(AudioManager.STREAM_MUSIC) * 100f / max).roundToInt()
+    }
+
+    fun adjustVolume(steps: Int) {
+        val am = audioManager ?: return
+        val max = am.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
+        val cur = am.getStreamVolume(AudioManager.STREAM_MUSIC)
+        val next = (cur + steps).coerceIn(0, max)
+        if (next != cur) {
+            am.setStreamVolume(AudioManager.STREAM_MUSIC, next, 0)
+        }
+        gestureIndicator = GestureIndicator.Volume(volumePercent())
+    }
+
+    // ---------------- brightness helper ----------------
+    fun setBrightness(f: Float) {
+        val w = activity?.window ?: return
+        val clamped = f.coerceIn(0.02f, 1f)
+        w.attributes = w.attributes.apply { screenBrightness = clamped }
+        gestureIndicator = GestureIndicator.Brightness((clamped * 100).roundToInt())
     }
 
     // keep screen on while playing
@@ -206,7 +319,6 @@ fun PlayerScreen(
                     android.view.KeyEvent.KEYCODE_DPAD_LEFT -> {
                         if (!controlsVisible) {
                             handleSeek(-15_000)
-                            showControls()
                             true
                         } else false
                     }
@@ -214,7 +326,23 @@ fun PlayerScreen(
                     android.view.KeyEvent.KEYCODE_DPAD_RIGHT -> {
                         if (!controlsVisible) {
                             handleSeek(15_000)
-                            showControls()
+                            true
+                        } else false
+                    }
+
+                    // D-pad up/down = volume while controls are hidden (TV-friendly)
+                    android.view.KeyEvent.KEYCODE_DPAD_UP -> {
+                        if (!controlsVisible && isTv) {
+                            adjustVolume(+1)
+                            interact()
+                            true
+                        } else false
+                    }
+
+                    android.view.KeyEvent.KEYCODE_DPAD_DOWN -> {
+                        if (!controlsVisible && isTv) {
+                            adjustVolume(-1)
+                            interact()
                             true
                         } else false
                     }
@@ -238,15 +366,113 @@ fun PlayerScreen(
                     else -> false
                 }
             }
+            // ---------------- touch gestures ----------------
+            // vertical drag, left half = brightness / right half = volume,
+            // horizontal drag = seek. Only active while controls are hidden so the
+            // slider and menus keep working normally.
+            .pointerInput(Unit) {
+                val density = view.resources.displayMetrics.density
+                val slop = density * 22f
+                awaitEachGesture {
+                    val down = awaitFirstDown(requireUnconsumed = false)
+                    if (down.isConsumed) return@awaitEachGesture
+                    val startX = down.position.x
+                    var lastY = down.position.y
+                    var mode = 0 // 0 undecided, 1 brightness, 2 volume, 3 seek
+                    var brightness = activity?.window?.attributes?.screenBrightness
+                        ?.takeIf { it >= 0f } ?: 0.5f
+                    var volumeAccum = 0f
+                    var gestureBaseMs = 0L
+                    var lastSeekApply = 0L
+                    val maxVolume = (audioManager?.getStreamMaxVolume(AudioManager.STREAM_MUSIC) ?: 15)
+                        .coerceAtLeast(1)
+
+                    while (true) {
+                        val event = awaitPointerEvent()
+                        if (event.changes.all { !it.pressed }) break
+                        val change = event.changes.firstOrNull { it.id == down.id } ?: continue
+                        if (change.isConsumed) continue
+                        val dx = change.position.x - startX
+                        val dyTotal = change.position.y - startY
+
+                        if (mode == 0) {
+                            if (controlsVisibleNow.value) continue
+                            if (abs(dx) > slop || abs(dyTotal) > slop) {
+                                mode = if (abs(dyTotal) >= abs(dx)) {
+                                    if (startX < size.width * 0.5f) 1 else 2
+                                } else {
+                                    if (durationMsNow.value > 0) 3 else 0
+                                }
+                                if (mode == 3) gestureBaseMs = positionMsNow.value
+                            }
+                        }
+
+                        if (mode != 0) {
+                            val dY = change.position.y - lastY
+                            lastY = change.position.y
+                            when (mode) {
+                                1 -> {
+                                    brightness += -dY / (size.height * 0.8f)
+                                    setBrightness(brightness)
+                                }
+
+                                2 -> {
+                                    volumeAccum += -dY
+                                    val pxPerStep = size.height / maxVolume.toFloat()
+                                    while (abs(volumeAccum) >= pxPerStep && pxPerStep > 0f) {
+                                        val step = if (volumeAccum > 0) 1 else -1
+                                        adjustVolume(step)
+                                        volumeAccum -= step * pxPerStep
+                                    }
+                                }
+
+                                3 -> {
+                                    val dur = durationMsNow.value
+                                    if (dur > 0) {
+                                        val msPerPx = dur / (size.width * 1.6f)
+                                        val target = (gestureBaseMs + (dx * msPerPx).toLong())
+                                            .coerceIn(0L, (dur - 500).coerceAtLeast(0L))
+                                        val delta = target - gestureBaseMs
+                                        gestureIndicator =
+                                            GestureIndicator.Seek(target, delta)
+                                        val now = System.currentTimeMillis()
+                                        if (now - lastSeekApply > 350) {
+                                            lastSeekApply = now
+                                            vm.seekTo(target)
+                                        }
+                                    }
+                                }
+                            }
+                            change.consume()
+                        }
+                    }
+                    if (mode != 0 && mode != 3) {
+                        gestureIndicator = null
+                    } else if (mode == 3) {
+                        gestureIndicator = null
+                    }
+                }
+            }
+            // tap / double-tap (kept separate so gesture drags cancel taps cleanly)
             .pointerInput(Unit) {
                 detectTapGestures(
-                    onTap = { controlsVisible = !controlsVisible; lastInteractionMs = System.currentTimeMillis() },
-                    onDoubleTap = { vm.togglePlayPause() },
+                    onTap = {
+                        controlsVisible = !controlsVisible
+                        lastInteractionMs = System.currentTimeMillis()
+                    },
+                    onDoubleTap = { offset ->
+                        val third = size.width / 3f
+                        when {
+                            offset.x < third -> vm.seekDelta(-10_000)
+                            offset.x > third * 2 -> vm.seekDelta(10_000)
+                            else -> vm.togglePlayPause()
+                        }
+                    },
                 )
             },
     ) {
         // ---------------- video surface ----------------
-        androidx.compose.foundation.layout.BoxWithConstraints(Modifier.fillMaxSize()) {
+        BoxWithConstraints(Modifier.fillMaxSize()) {
             val screenAspect = maxWidth.value / maxHeight.value.coerceAtLeast(1f)
             AndroidView(
                 factory = { ctx ->
@@ -347,6 +573,72 @@ fun PlayerScreen(
             )
         }
 
+        // ---------------- gesture indicator ----------------
+        gestureIndicator?.let { ind ->
+            Surface(
+                color = Color(0xE6141418),
+                shape = RoundedCornerShape(14.dp),
+                modifier = Modifier.align(Alignment.Center),
+            ) {
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    modifier = Modifier.padding(horizontal = 26.dp, vertical = 18.dp),
+                ) {
+                    when (ind) {
+                        is GestureIndicator.Brightness -> {
+                            Icon(
+                                Icons.Filled.Brightness7,
+                                contentDescription = "Brightness",
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(34.dp),
+                            )
+                            Spacer(Modifier.height(8.dp))
+                            Text("${ind.pct}%", color = Color.White, fontWeight = FontWeight.Bold)
+                            Spacer(Modifier.height(8.dp))
+                            LinearProgressIndicator(
+                                progress = { ind.pct / 100f },
+                                modifier = Modifier.width(140.dp),
+                                color = MaterialTheme.colorScheme.primary,
+                            )
+                        }
+
+                        is GestureIndicator.Volume -> {
+                            Icon(
+                                if (ind.pct <= 0) Icons.Filled.VolumeOff else Icons.Filled.VolumeUp,
+                                contentDescription = "Volume",
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(34.dp),
+                            )
+                            Spacer(Modifier.height(8.dp))
+                            Text("${ind.pct}%", color = Color.White, fontWeight = FontWeight.Bold)
+                            Spacer(Modifier.height(8.dp))
+                            LinearProgressIndicator(
+                                progress = { ind.pct / 100f },
+                                modifier = Modifier.width(140.dp),
+                                color = MaterialTheme.colorScheme.primary,
+                            )
+                        }
+
+                        is GestureIndicator.Seek -> {
+                            Icon(
+                                if (ind.deltaMs >= 0) Icons.Filled.FastForward else Icons.Filled.FastRewind,
+                                contentDescription = "Seek",
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(34.dp),
+                            )
+                            Spacer(Modifier.height(8.dp))
+                            Text(Format.time(ind.targetMs), color = Color.White, fontWeight = FontWeight.Bold)
+                            val dSec = ind.deltaMs / 1000
+                            Text(
+                                (if (dSec >= 0) "+$dSec" else "$dSec") + "s",
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
         // ---------------- seek flash ----------------
         seekFlash?.let { flash ->
             Surface(
@@ -412,19 +704,23 @@ fun PlayerScreen(
             }
         }
 
-        // ---------------- controls ----------------
-        if (controlsVisible && phase is PlayerViewModel.Phase.Ready) {
-            // auto-hide: 4.5s after the LAST interaction while playing, unless a menu is open
-            LaunchedEffect(isPlaying, openMenu, lastInteractionMs) {
-                while (isPlaying && openMenu == null) {
-                    kotlinx.coroutines.delay(4_500)
-                    if (System.currentTimeMillis() - lastInteractionMs >= 4_400) {
-                        controlsVisible = false
-                        break
-                    }
+        // ---------------- controls auto-hide ----------------
+        LaunchedEffect(isPlaying, openMenu, controlsVisible, lastInteractionMs) {
+            while (isPlaying && openMenu == null && controlsVisible) {
+                kotlinx.coroutines.delay(4_500)
+                if (System.currentTimeMillis() - lastInteractionMs >= 4_400) {
+                    controlsVisible = false
+                    break
                 }
             }
+        }
 
+        // ---------------- controls ----------------
+        AnimatedVisibility(
+            visible = controlsVisible && phase is PlayerViewModel.Phase.Ready,
+            enter = fadeIn(tween(180)),
+            exit = fadeOut(tween(240)),
+        ) {
             Column(
                 Modifier
                     .fillMaxSize()
@@ -469,8 +765,8 @@ fun PlayerScreen(
                             )
                         }
                     }
-                    val readyPhase = phase as PlayerViewModel.Phase.Ready
-                    Badge("${readyPhase.provider.label}")
+                    val readyPhase = phase as? PlayerViewModel.Phase.Ready
+                    if (readyPhase != null) Badge(readyPhase.provider.label)
                     Spacer(Modifier.width(8.dp))
                     if (stats.videoHeight > 0) {
                         val res = if (stats.videoHeight >= 2000) "4K ${stats.videoHeight}p" else "${stats.videoHeight}p"
@@ -490,10 +786,13 @@ fun PlayerScreen(
                             .padding(horizontal = 20.dp),
                     ) {
                         Column(Modifier.padding(12.dp)) {
-                            val readyPhase = phase as PlayerViewModel.Phase.Ready
-                            StatLine("provider", readyPhase.provider.label)
-                            StatLine("stream", readyPhase.streamKind)
+                            val readyPhase = phase as? PlayerViewModel.Phase.Ready
+                            StatLine("provider", readyPhase?.provider?.label ?: "-")
+                            StatLine("stream", readyPhase?.streamKind ?: "-")
                             StatLine("quality", "${stats.videoHeight}p @ ${Format.bitrate(stats.videoBitrate)}")
+                            if (stats.bandwidthBps > 0) {
+                                StatLine("measured bandwidth", Format.bitrate(stats.bandwidthBps))
+                            }
                             StatLine("dropped frames", "${stats.droppedFrames}")
                             StatLine("rebuffers (60s)", "${stats.rebuffers}")
                             StatLine("buffer ahead", Format.time((vm.bufferedMs.value - positionMs).coerceAtLeast(0)))
@@ -551,7 +850,7 @@ fun PlayerScreen(
                         onClick = { vm.togglePlayPause() },
                         modifier = Modifier
                             .size(62.dp)
-                            .background(MaterialTheme.colorScheme.primary, androidx.compose.foundation.shape.CircleShape),
+                            .background(MaterialTheme.colorScheme.primary, CircleShape),
                     ) {
                         Icon(
                             if (isPlaying) Icons.Filled.Pause else Icons.Filled.PlayArrow,
@@ -565,7 +864,7 @@ fun PlayerScreen(
                     }
                     Spacer(Modifier.weight(1f))
 
-                    // subtitles
+                    // subtitles (embedded manifest tracks + downloaded sidecars)
                     Box {
                         MenuButton(
                             icon = { Icon(Icons.Filled.Subtitles, null, tint = Color.White) },
@@ -575,11 +874,31 @@ fun PlayerScreen(
                         )
                         DropdownMenu(expanded = openMenu == "subs", onDismissRequest = { openMenu = null }) {
                             DropdownMenuItem(text = { Text("Off") }, onClick = { vm.selectSubtitle(null); openMenu = null })
-                            subs.forEach { s ->
+                            if (embeddedTextTracks.isNotEmpty()) {
                                 DropdownMenuItem(
-                                    text = { Text(s.display + (s.language?.let { "  ($it)" } ?: "")) },
-                                    onClick = { vm.selectSubtitle(s); openMenu = null },
+                                    text = { Text("— From this stream —", style = MaterialTheme.typography.labelSmall) },
+                                    onClick = {},
+                                    enabled = false,
                                 )
+                                embeddedTextTracks.forEach { t ->
+                                    DropdownMenuItem(
+                                        text = { Text(t.label + (if (t.isSelected) "  ✓" else "")) },
+                                        onClick = { vm.selectEmbeddedSub(t.groupIndex, t.trackIndex); openMenu = null },
+                                    )
+                                }
+                            }
+                            if (subs.isNotEmpty()) {
+                                DropdownMenuItem(
+                                    text = { Text("— Downloaded —", style = MaterialTheme.typography.labelSmall) },
+                                    onClick = {},
+                                    enabled = false,
+                                )
+                                subs.forEach { s ->
+                                    DropdownMenuItem(
+                                        text = { Text(s.display + (s.language?.let { "  ($it)" } ?: "")) },
+                                        onClick = { vm.selectSubtitle(s); openMenu = null },
+                                    )
+                                }
                             }
                         }
                     }

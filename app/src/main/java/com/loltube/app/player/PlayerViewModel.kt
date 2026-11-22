@@ -4,6 +4,7 @@ import android.app.Application
 import androidx.media3.common.C
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
+import androidx.media3.common.TrackSelectionOverride
 import androidx.media3.common.VideoSize
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.ExoPlayer
@@ -47,6 +48,15 @@ class PlayerViewModel(
         data class Failed(val errors: String) : Phase
     }
 
+    /** A subtitle track that lives inside the HLS/DASH manifest itself. */
+    data class EmbeddedTextTrack(
+        val groupIndex: Int,
+        val trackIndex: Int,
+        val label: String,
+        val language: String?,
+        val isSelected: Boolean,
+    )
+
     data class PendingNext(val season: Int, val episode: Int, val name: String, val countdown: Int)
 
     data class Stats(
@@ -54,6 +64,7 @@ class PlayerViewModel(
         val rebuffers: Int = 0,
         val videoHeight: Int = 0,
         val videoBitrate: Int = 0,
+        val bandwidthBps: Int = 0,
     )
 
     // ---- observable state -------------------------------------------------
@@ -95,6 +106,9 @@ class PlayerViewModel(
 
     private val _subs = MutableStateFlow<List<Wyzie.Sub>>(emptyList())
     val subs: StateFlow<List<Wyzie.Sub>> = _subs.asStateFlow()
+
+    private val _embeddedTextTracks = MutableStateFlow<List<EmbeddedTextTrack>>(emptyList())
+    val embeddedTextTracks: StateFlow<List<EmbeddedTextTrack>> = _embeddedTextTracks.asStateFlow()
 
     private val _activeSubLabel = MutableStateFlow<String?>(null)
     val activeSubLabel: StateFlow<String?> = _activeSubLabel.asStateFlow()
@@ -140,9 +154,17 @@ class PlayerViewModel(
                     rebufferTimes.add(now)
                     rebufferTimes.removeAll { now - it > 60_000 }
                     _stats.value = _stats.value.copy(rebuffers = rebufferTimes.size)
-                    if (rebufferTimes.size >= 3 && _qualityMode.value == QualityMode.FORCE_MAX) {
-                        rebufferTimes.clear()
-                        downgradeForStability()
+                    when {
+                        rebufferTimes.size >= 3 && _qualityMode.value == QualityMode.FORCE_MAX -> {
+                            rebufferTimes.clear()
+                            downgradeForStability()
+                        }
+                        rebufferTimes.size >= 4 && _qualityMode.value == QualityMode.AUTO_4K -> {
+                            // ABR couldn't find a sustainable tier on its own — cap it.
+                            rebufferTimes.clear()
+                            setQuality(QualityMode.CAP_1080)
+                            _message.value = "Network can't sustain this quality — capped to 1080p"
+                        }
                     }
                 }
             }
@@ -186,6 +208,31 @@ class PlayerViewModel(
                 val sel = p.trackSelectionParameters.preferredAudioLanguages.firstOrNull()
                 _activeAudio.value = sel ?: langs.first()
             }
+
+            // Expose subtitle tracks embedded in the manifest (the sites' own subs).
+            val embedded = mutableListOf<EmbeddedTextTrack>()
+            for (gi in 0 until tracks.groups.size) {
+                val g = tracks.groups[gi]
+                if (g.type != C.TRACK_TYPE_TEXT) continue
+                for (ti in 0 until g.length) {
+                    val fmt = g.getTrackFormat(ti)
+                    val label = buildString {
+                        append(fmt.label ?: fmt.language ?: fmt.id ?: "Track ${gi}:${ti}")
+                    }
+                    embedded.add(
+                        EmbeddedTextTrack(
+                            groupIndex = gi,
+                            trackIndex = ti,
+                            label = label,
+                            language = fmt.language,
+                            isSelected = g.isTrackSelected(ti),
+                        )
+                    )
+                }
+            }
+            _embeddedTextTracks.value = embedded
+            maybeAutoSelectEmbedded()
+
             p.videoFormat?.let { f ->
                 _stats.value = _stats.value.copy(videoHeight = f.height, videoBitrate = f.bitrate)
             }
@@ -202,6 +249,43 @@ class PlayerViewModel(
             elapsedMs: Long,
         ) {
             _stats.value = _stats.value.copy(droppedFrames = _stats.value.droppedFrames + droppedFrames)
+        }
+
+        override fun onBandwidthEstimate(
+            eventTime: AnalyticsListener.EventTime,
+            totalLoadTimeMs: Int,
+            totalBytesLoaded: Long,
+            bitrateEstimate: Int,
+        ) {
+            if (bitrateEstimate <= 0) return
+            _stats.value = _stats.value.copy(bandwidthBps = bitrateEstimate)
+            val now = android.os.SystemClock.elapsedRealtime()
+            if (now - lastBandwidthSaveMs > 15_000) {
+                lastBandwidthSaveMs = now
+                viewModelScope.launch { SettingsStore.setLastBandwidth(context, bitrateEstimate) }
+            }
+        }
+    }
+
+    private var lastBandwidthSaveMs = 0L
+    private var embeddedAutoTried = false
+
+    /** Auto-pick a preferred embedded subtitle track once the manifest exposes them. */
+    private fun maybeAutoSelectEmbedded() {
+        if (embeddedAutoTried) return
+        val embedded = _embeddedTextTracks.value
+        if (embedded.isEmpty()) return
+        if (!settings.subtitlesEnabled) return
+        if (activeSubtitle != null || _activeSubLabel.value != null) return
+        embeddedAutoTried = true
+        val pref = settings.preferredSubtitleLang.lowercase()
+        val pick = embedded.firstOrNull { it.language?.lowercase()?.startsWith(pref) == true }
+            ?: embedded.firstOrNull {
+                it.language?.lowercase() == "en" || it.label.contains("english", true)
+            }
+        if (pick != null) {
+            if (pick.isSelected) _activeSubLabel.value = pick.label
+            else selectEmbeddedSub(pick.groupIndex, pick.trackIndex)
         }
     }
 
@@ -220,13 +304,22 @@ class PlayerViewModel(
             )
 
             // resolve start position:
-            //  >0 explicit resume, <0 explicit restart, 0 auto (use saved progress)
+            //  >0 explicit resume, <0 explicit restart, 0 auto (use saved progress).
+            //  A saved position that is >= 90% into the file is treated as "already
+            //  watched" — restart at 0 instead of jumping to the credits (which used
+            //  to instantly end the episode and roll into the NEXT one).
             val effectiveStartMs = when {
                 request.startAtMs > 0 -> request.startAtMs
                 request.startAtMs < 0 -> 0L
-                else -> ProgressStore.get(
-                    context, request.imdbId, request.season, request.episode,
-                )?.positionMs?.takeIf { it > 30_000 && it < 95_000 * 60 } ?: 0L
+                else -> {
+                    val saved = ProgressStore.get(
+                        context, request.imdbId, request.season, request.episode,
+                    )
+                    val finished = saved != null && saved.durationMs > 0 &&
+                            saved.positionMs > saved.durationMs * 90 / 100
+                    if (finished) 0L
+                    else saved?.positionMs?.takeIf { it > 30_000 && it < 95_000 * 60 } ?: 0L
+                }
             }
             currentRequest = currentRequest.copy(startAtMs = effectiveStartMs)
 
@@ -239,6 +332,8 @@ class PlayerViewModel(
         viewModelScope.launch {
             val subs = Wyzie.fetch(req.imdbId, req.season, req.episode)
             _subs.value = subs
+            // Embedded manifest tracks are auto-picked in onTracksChanged (they only
+            // exist once the player has parsed the manifest).
             if (settings.subtitlesEnabled && activeSubtitle == null) {
                 val pref = settings.preferredSubtitleLang.lowercase()
                 val match = subs.firstOrNull { s ->
@@ -380,10 +475,7 @@ class PlayerViewModel(
         if (sub == null) {
             activeSubtitle = null
             _activeSubLabel.value = null
-            if (p != null) {
-                p.trackSelectionParameters = p.trackSelectionParameters.buildUpon()
-                    .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true).build()
-            }
+            disableAllTextTracks(p)
             return
         }
         if (p == null) {
@@ -416,8 +508,35 @@ class PlayerViewModel(
             p.prepare()
             p.playWhenReady = true
             p.trackSelectionParameters = p.trackSelectionParameters.buildUpon()
-                .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, false).build()
+                .clearOverridesOfType(C.TRACK_TYPE_TEXT)
+                .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, false)
+                .build()
         }
+    }
+
+    /** Switch to a subtitle track embedded in the stream's own manifest. */
+    fun selectEmbeddedSub(groupIndex: Int, trackIndex: Int) {
+        val p = player.value ?: return
+        val tracks = p.currentTracks
+        if (groupIndex >= tracks.groups.size) return
+        val group = tracks.groups[groupIndex]
+        if (trackIndex >= group.length) return
+        activeSubtitle = null // external sidecar off
+        val fmt = group.getTrackFormat(trackIndex)
+        _activeSubLabel.value = fmt.label ?: fmt.language ?: "Embedded"
+        p.trackSelectionParameters = p.trackSelectionParameters.buildUpon()
+            .clearOverridesOfType(C.TRACK_TYPE_TEXT)
+            .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, false)
+            .setOverrideForType(TrackSelectionOverride(group.mediaTrackGroup, trackIndex))
+            .build()
+    }
+
+    private fun disableAllTextTracks(p: ExoPlayer?) {
+        if (p == null) return
+        p.trackSelectionParameters = p.trackSelectionParameters.buildUpon()
+            .clearOverridesOfType(C.TRACK_TYPE_TEXT)
+            .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true)
+            .build()
     }
 
     fun selectAudio(lang: String) {
@@ -501,6 +620,7 @@ class PlayerViewModel(
         _activeSubLabel.value = null
         activeSubtitle = null
         _message.value = "Loading next episode…"
+        embeddedAutoTried = false
         fetchSubtitles(req)
         startResolve(req, reusePlayer = true)
     }

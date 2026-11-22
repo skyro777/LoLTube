@@ -3,6 +3,7 @@ package com.loltube.app.data
 import android.content.Context
 import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
+import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import com.loltube.app.providers.ProviderId
@@ -30,19 +31,22 @@ enum class AspectMode(val label: String) {
 }
 
 enum class BufferProfile(val label: String, val minMs: Int, val maxMs: Int, val playbackMs: Int, val rebufferMs: Int, val backMs: Int) {
-    SMOOTH("Smooth 4K (30–90s buffer)", 30_000, 90_000, 5_000, 8_000, 15_000),
+    SMOOTH("Smooth 4K (30–90s buffer)", 30_000, 90_000, 5_000, 10_000, 30_000),
+    DEEP("Deep 4K (45–120s buffer)", 45_000, 120_000, 5_000, 12_000, 30_000),
     BALANCED("Balanced (20–60s buffer)", 20_000, 60_000, 3_000, 5_000, 10_000),
     LOW_MEM("Low memory (10–30s buffer)", 10_000, 30_000, 2_000, 3_000, 5_000),
 }
 
 data class AppSettings(
-    val providerOrder: List<ProviderId> = listOf(ProviderId.VIDFAST, ProviderId.VIDCORE, ProviderId.MAPPLE),
+    // Vidcore first — its CDN is measurably faster than vidfast's right now.
+    val providerOrder: List<ProviderId> = listOf(ProviderId.VIDCORE, ProviderId.VIDFAST, ProviderId.MAPPLE),
     val quality: QualityMode = QualityMode.AUTO_4K,
     val aspect: AspectMode = AspectMode.AUTO,
     val bufferProfile: BufferProfile = BufferProfile.SMOOTH,
     val autoNextEpisode: Boolean = true,
     val preferredSubtitleLang: String = "en",
     val subtitlesEnabled: Boolean = true,
+    val lastBandwidthBps: Int = 0,
 )
 
 object SettingsStore {
@@ -53,6 +57,10 @@ object SettingsStore {
     private val KEY_AUTO_NEXT = booleanPreferencesKey("auto_next_episode")
     private val KEY_SUB_LANG = stringPreferencesKey("preferred_subtitle_lang")
     private val KEY_SUBS_ENABLED = booleanPreferencesKey("subtitles_enabled")
+    private val KEY_LAST_BITRATE = intPreferencesKey("last_bandwidth_bps")
+
+    /** The old shipped default order — silently migrated to the new Vidcore-first order. */
+    private val LEGACY_DEFAULT_ORDER = listOf(ProviderId.VIDFAST, ProviderId.VIDCORE, ProviderId.MAPPLE)
 
     fun flow(context: Context): Flow<AppSettings> = context.settingsStore.data.map { p ->
         AppSettings(
@@ -63,6 +71,7 @@ object SettingsStore {
             autoNextEpisode = p[KEY_AUTO_NEXT] ?: true,
             preferredSubtitleLang = p[KEY_SUB_LANG] ?: "en",
             subtitlesEnabled = p[KEY_SUBS_ENABLED] ?: true,
+            lastBandwidthBps = p[KEY_LAST_BITRATE] ?: 0,
         )
     }
 
@@ -96,9 +105,16 @@ object SettingsStore {
         context.settingsStore.edit { it[KEY_SUBS_ENABLED] = v }
     }
 
+    /** Persist the bandwidth the ABR measured, so the next session warm-starts. */
+    suspend fun setLastBandwidth(context: Context, bps: Int) {
+        if (bps <= 0) return
+        context.settingsStore.edit { it[KEY_LAST_BITRATE] = bps }
+    }
+
     private fun parseProviders(raw: String?): List<ProviderId> {
         if (raw.isNullOrBlank()) return AppSettings().providerOrder
         val parsed = raw.split(",").mapNotNull { s -> ProviderId.entries.firstOrNull { it.name == s.trim() } }
+        if (parsed == LEGACY_DEFAULT_ORDER) return AppSettings().providerOrder
         val missing = ProviderId.entries.filter { it !in parsed }
         return (parsed + missing).ifEmpty { AppSettings().providerOrder }
     }

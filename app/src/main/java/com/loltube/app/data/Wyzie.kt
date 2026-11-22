@@ -19,25 +19,32 @@ object Wyzie {
         val encoding: String? = null,
     )
 
+    private val ORIGINS = listOf("https://vidfast.vc", "https://vidcore.io")
+
     suspend fun fetch(imdbId: String, season: Int? = null, episode: Int? = null): List<Sub> =
         withContext(Dispatchers.IO) {
-            runCatching {
-                val url = buildString {
-                    append("https://vidfast.vc/wyzie?id=").append(imdbId)
-                    season?.let { append("&season=").append(it) }
-                    episode?.let { append("&episode=").append(it) }
-                }
-                val body = Net.get(url, headers = mapOf("Referer" to "https://vidfast.vc/"))
-                Net.json.decodeFromString(ListSerializer(Sub.serializer()), body)
-                    .filter { it.url.isNotBlank() }
-            }.onFailure { AppLog.e("Wyzie", "subtitles failed: ${it.message}") }
-                .getOrDefault(emptyList())
+            for (origin in ORIGINS) {
+                val result = runCatching {
+                    val url = buildString {
+                        append(origin).append("/wyzie?id=").append(imdbId)
+                        season?.let { append("&season=").append(it) }
+                        episode?.let { append("&episode=").append(it) }
+                    }
+                    val body = Net.get(url, headers = mapOf("Referer" to "$origin/"))
+                    Net.json.decodeFromString(ListSerializer(Sub.serializer()), body)
+                        .filter { it.url.isNotBlank() }
+                }.onFailure { AppLog.d("Wyzie", "$origin failed: ${it.message}") }
+                    .getOrNull()
+                if (!result.isNullOrEmpty()) return@withContext result
+            }
+            emptyList()
         }
 
     /** Download a subtitle and persist to a cache file; returns (file, mime). */
     suspend fun download(sub: Sub): Pair<java.io.File, String>? = withContext(Dispatchers.IO) {
         runCatching {
-            val body = Net.get(sub.url, headers = mapOf("Referer" to "https://vidfast.vc/"))
+            val referer = "https://" + (android.net.Uri.parse(sub.url).host ?: "vidfast.vc") + "/"
+            val body = Net.get(sub.url, headers = mapOf("Referer" to referer))
             val mime = if (body.trimStart().startsWith("WEBVTT", ignoreCase = true)) "text/vtt"
             else "application/x-subrip"
             val ext = if (mime == "text/vtt") "vtt" else "srt"

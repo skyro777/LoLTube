@@ -126,6 +126,36 @@ object Cinemeta {
                 .getOrDefault(emptyList())
         }
 
+    /**
+     * Full-text search across movies and series (Cinemeta's own search catalog).
+     * Same API that powers the browse feeds, so it works wherever the feeds work.
+     */
+    suspend fun search(query: String): List<CatalogEntry> = withContext(Dispatchers.IO) {
+        val q = query.trim()
+        if (q.length < 2) return@withContext emptyList()
+        val enc = java.net.URLEncoder.encode(q, "UTF-8")
+        runCatching {
+            val movies = fetchMetas("$BASE/catalog/${Catalog.MOVIE}/top/search=$enc.json", Catalog.MOVIE)
+            val series = fetchMetas("$BASE/catalog/${Catalog.SERIES}/top/search=$enc.json", Catalog.SERIES)
+            (movies + series)
+                .distinctBy { it.imdbId }
+                .sortedByDescending { it.imdbRating?.toDoubleOrNull() ?: 0.0 }
+                .take(40)
+        }.onFailure { AppLog.e("Cinemeta", "search '$q' failed: ${it.message}") }
+            .getOrDefault(emptyList())
+    }
+
+    private suspend fun fetchMetas(url: String, fallbackType: String): List<CatalogEntry> =
+        withContext(Dispatchers.IO) {
+            runCatching {
+                val body = Net.get(url)
+                Net.json.decodeFromString(CatalogResponse.serializer(), body).metas
+                    .filter { it.id.startsWith("tt") }
+                    .map { it.toEntry(fallbackType) }
+            }.onFailure { AppLog.e("Cinemeta", "fetch failed: ${it.message}") }
+                .getOrDefault(emptyList())
+        }
+
     /** Full metadata (details + episode list for series). */
     suspend fun meta(imdbId: String, type: String): MediaDetails? = withContext(Dispatchers.IO) {
         runCatching {

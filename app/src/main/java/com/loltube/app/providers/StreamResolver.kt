@@ -115,12 +115,15 @@ class MappleStreamInterceptor : Interceptor {
     }
 
     companion object {
-        /** Client for playback: keep-alive + mapple fragment proxy support. */
+        /** Client for playback: keep-alive + mapple fragment proxy support.
+         *  Long read timeout: 4K segments are big and some CDN nodes are slow —
+         *  a short timeout kills in-flight segment loads and surfaces as a rebuffer. */
         fun playbackClient(headers: Map<String, String>): OkHttpClient {
             return NetBase.newBuilder()
                 .addInterceptor(MappleStreamInterceptor())
-                .connectTimeout(10, TimeUnit.SECONDS)
-                .readTimeout(30, TimeUnit.SECONDS)
+                .connectTimeout(15, TimeUnit.SECONDS)
+                .readTimeout(45, TimeUnit.SECONDS)
+                .callTimeout(0, TimeUnit.MILLISECONDS)
                 .retryOnConnectionFailure(true)
                 .build()
         }
