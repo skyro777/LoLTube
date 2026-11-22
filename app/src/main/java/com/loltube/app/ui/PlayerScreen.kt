@@ -1,10 +1,9 @@
 package com.loltube.app.ui
 
 import android.app.Activity
-import android.content.ActivityInfo
-import android.content.ActivityInfo
 import android.content.Context
 import android.content.ContextWrapper
+import android.content.pm.ActivityInfo
 import android.media.AudioManager
 import android.os.Build
 import android.view.View
