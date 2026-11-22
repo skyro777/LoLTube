@@ -377,6 +377,7 @@ fun PlayerScreen(
                     val down = awaitFirstDown(requireUnconsumed = false)
                     if (down.isConsumed) return@awaitEachGesture
                     val startX = down.position.x
+                    val startY = down.position.y
                     var lastY = down.position.y
                     var mode = 0 // 0 undecided, 1 brightness, 2 volume, 3 seek
                     var brightness = activity?.window?.attributes?.screenBrightness
@@ -389,7 +390,7 @@ fun PlayerScreen(
 
                     while (true) {
                         val event = awaitPointerEvent()
-                        if (event.changes.all { !it.pressed }) break
+                        if (event.changes.all { !it.isPressed }) break
                         val change = event.changes.firstOrNull { it.id == down.id } ?: continue
                         if (change.isConsumed) continue
                         val dx = change.position.x - startX
@@ -446,9 +447,7 @@ fun PlayerScreen(
                             change.consume()
                         }
                     }
-                    if (mode != 0 && mode != 3) {
-                        gestureIndicator = null
-                    } else if (mode == 3) {
+                    if (mode != 0) {
                         gestureIndicator = null
                     }
                 }

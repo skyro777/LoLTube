@@ -1,0 +1,73 @@
+﻿2026-11-22T15:55:37.0786733Z ##[group]Run actions/checkout@v4
+2026-11-22T15:55:37.0787865Z with:
+2026-11-22T15:55:37.0788544Z   repository: skyro777/LoLTube
+2026-11-22T15:55:37.0796061Z   token: ***
+2026-11-22T15:55:37.0796729Z   ssh-strict: true
+2026-11-22T15:55:37.0797421Z   ssh-user: git
+2026-11-22T15:55:37.0798133Z   persist-credentials: true
+2026-11-22T15:55:37.0798910Z   clean: true
+2026-11-22T15:55:37.0799716Z   sparse-checkout-cone-mode: true
+2026-11-22T15:55:37.0800558Z   fetch-depth: 1
+2026-11-22T15:55:37.0801243Z   fetch-tags: false
+2026-11-22T15:55:37.0801977Z   show-progress: true
+2026-11-22T15:55:37.0802695Z   lfs: false
+2026-11-22T15:55:37.0803365Z   submodules: false
+2026-11-22T15:55:37.0804087Z   set-safe-directory: true
+2026-11-22T15:55:37.0804895Z   allow-unsafe-pr-checkout: false
+2026-11-22T15:55:37.0805982Z ##[endgroup]
+2026-11-22T15:55:37.3050065Z Syncing repository: skyro777/LoLTube
+2026-11-22T15:55:37.3053264Z ##[group]Getting Git version info
+2026-11-22T15:55:37.3054864Z Working directory is '/home/runner/work/LoLTube/LoLTube'
+2026-11-22T15:55:37.3057149Z [command]/usr/bin/git version
+2026-11-22T15:55:37.3058345Z git version 2.56.1
+2026-11-22T15:55:37.3062243Z ##[endgroup]
+2026-11-22T15:55:37.3069954Z Temporarily overriding HOME='/home/runner/work/_temp/619e933e-de5a-49db-95fb-f48dfca40baa' before making global git config changes
+2026-11-22T15:55:37.3073571Z Adding repository directory to the temporary git global config as a safe directory
+2026-11-22T15:55:37.3076423Z [command]/usr/bin/git config --global --add safe.directory /home/runner/work/LoLTube/LoLTube
+2026-11-22T15:55:37.3091102Z Deleting the contents of '/home/runner/work/LoLTube/LoLTube'
+2026-11-22T15:55:37.3093927Z ##[group]Initializing the repository
+2026-11-22T15:55:37.3095991Z [command]/usr/bin/git init /home/runner/work/LoLTube/LoLTube
+2026-11-22T15:55:37.3164128Z hint: Using 'master' as the name for the initial branch. This default branch name
+2026-11-22T15:55:37.3166947Z hint: will change to "main" in Git 3.0. To configure the initial branch name
+2026-11-22T15:55:37.3169231Z hint: to use in all of your new repositories, which will suppress this warning,
+2026-11-22T15:55:37.3170841Z hint: call:
+2026-11-22T15:55:37.3171879Z hint:
+2026-11-22T15:55:37.3173136Z hint: 	git config --global init.defaultBranch <name>
+2026-11-22T15:55:37.3174657Z hint:
+2026-11-22T15:55:37.3176066Z hint: Names commonly chosen instead of 'master' are 'main', 'trunk' and
+2026-11-22T15:55:37.3178327Z hint: 'development'. The just-created branch can be renamed via this command:
+2026-11-22T15:55:37.3180317Z hint:
+2026-11-22T15:55:37.3181344Z hint: 	git branch -m <name>
+2026-11-22T15:55:37.3182488Z hint:
+2026-11-22T15:55:37.3183585Z hint: Disable this message with "git config set advice.defaultBranchName false"
+2026-11-22T15:55:37.3185242Z Initialized empty Git repository in /home/runner/work/LoLTube/LoLTube/.git/
+2026-11-22T15:55:37.3188847Z [command]/usr/bin/git remote add origin https://github.com/skyro777/LoLTube
+2026-11-22T15:55:37.3274268Z ##[endgroup]
+2026-11-22T15:55:37.3276621Z ##[group]Disabling automatic garbage collection
+2026-11-22T15:55:37.3278771Z [command]/usr/bin/git config --local gc.auto 0
+2026-11-22T15:55:37.3319641Z ##[endgroup]
+2026-11-22T15:55:37.3321654Z ##[group]Setting up auth
+2026-11-22T15:55:37.3352047Z [command]/usr/bin/git config --local --name-only --get-regexp core\.sshCommand
+2026-11-22T15:55:37.3384070Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'core\.sshCommand' && git config --local --unset-all 'core.sshCommand' || :"
+2026-11-22T15:55:37.3731959Z [command]/usr/bin/git config --local --name-only --get-regexp http\.https\:\/\/github\.com\/\.extraheader
+2026-11-22T15:55:37.3762087Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://github.com/.extraheader' || :"
+2026-11-22T15:55:37.3993062Z [command]/usr/bin/git config --local --name-only --get-regexp ^includeIf\.gitdir:
+2026-11-22T15:55:37.4021443Z [command]/usr/bin/git submodule foreach --recursive git config --local --show-origin --name-only --get-regexp remote.origin.url
+2026-11-22T15:55:37.4248290Z [command]/usr/bin/git config --local http.https://github.com/.extraheader AUTHORIZATION: basic ***
+2026-11-22T15:55:37.4282381Z ##[endgroup]
+2026-11-22T15:55:37.4289242Z ##[group]Fetching the repository
+2026-11-22T15:55:37.4291459Z [command]/usr/bin/git -c protocol.version=2 fetch --no-tags --prune --no-recurse-submodules --depth=1 origin +72afd35d097b00450bb5b624a86e2203bd86e6de:refs/remotes/origin/main
+2026-11-22T15:55:37.7035939Z From https://github.com/skyro777/LoLTube
+2026-11-22T15:55:37.7037114Z  * [new ref]         72afd35d097b00450bb5b624a86e2203bd86e6de -> origin/main
+2026-11-22T15:55:37.7039743Z ##[endgroup]
+2026-11-22T15:55:37.7040398Z ##[group]Determining the checkout info
+2026-11-22T15:55:37.7041926Z ##[endgroup]
+2026-11-22T15:55:37.7046673Z [command]/usr/bin/git sparse-checkout disable
+2026-11-22T15:55:37.7090526Z [command]/usr/bin/git config --local --unset-all extensions.worktreeConfig
+2026-11-22T15:55:37.7117125Z ##[group]Checking out the ref
+2026-11-22T15:55:37.7121086Z [command]/usr/bin/git checkout --progress --force -B main refs/remotes/origin/main
+2026-11-22T15:55:37.7227185Z Switched to a new branch 'main'
+2026-11-22T15:55:37.7231967Z branch 'main' set up to track 'origin/main'.
+2026-11-22T15:55:37.7236049Z ##[endgroup]
+2026-11-22T15:55:37.7271306Z [command]/usr/bin/git log -1 --format=%H
+2026-11-22T15:55:37.7292252Z 72afd35d097b00450bb5b624a86e2203bd86e6de

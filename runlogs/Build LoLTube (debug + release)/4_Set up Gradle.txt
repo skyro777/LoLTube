@@ -1,0 +1,78 @@
+﻿2026-11-22T15:55:37.9594659Z ##[group]Run gradle/actions/setup-gradle@v4
+2026-11-22T15:55:37.9595081Z with:
+2026-11-22T15:55:37.9595367Z   cache-disabled: false
+2026-11-22T15:55:37.9595676Z   cache-read-only: false
+2026-11-22T15:55:37.9595991Z   cache-write-only: false
+2026-11-22T15:55:37.9596307Z   cache-overwrite-existing: false
+2026-11-22T15:55:37.9596649Z   cache-cleanup: on-success
+2026-11-22T15:55:37.9597002Z   gradle-home-cache-includes: caches
+notifications
+
+2026-11-22T15:55:37.9597379Z   add-job-summary: always
+2026-11-22T15:55:37.9597700Z   add-job-summary-as-pr-comment: never
+2026-11-22T15:55:37.9598042Z   dependency-graph: disabled
+2026-11-22T15:55:37.9598401Z   dependency-graph-report-dir: dependency-graph-reports
+2026-11-22T15:55:37.9598803Z   dependency-graph-continue-on-failure: true
+2026-11-22T15:55:37.9599371Z   build-scan-publish: false
+2026-11-22T15:55:37.9599700Z   validate-wrappers: true
+2026-11-22T15:55:37.9600020Z   allow-snapshot-wrappers: false
+2026-11-22T15:55:37.9600355Z   gradle-home-cache-strict-match: false
+2026-11-22T15:55:37.9600740Z   workflow-job-context: null
+2026-11-22T15:55:37.9602943Z   github-token: ***
+2026-11-22T15:55:37.9603243Z env:
+2026-11-22T15:55:37.9603611Z   JAVA_HOME: /opt/hostedtoolcache/Java_Temurin-Hotspot_jdk/17.0.21-9/x64
+2026-11-22T15:55:37.9604113Z   JAVA_HOME_17_X64: /opt/hostedtoolcache/Java_Temurin-Hotspot_jdk/17.0.21-9/x64
+2026-11-22T15:55:37.9604543Z ##[endgroup]
+2026-11-22T15:55:39.4554328Z Merged default JDK locations into /home/runner/.m2/toolchains.xml
+2026-11-22T15:55:39.4557584Z Preparing cache for cleanup.
+2026-11-22T15:55:39.4559644Z ##[group]Restore Gradle state from cache
+2026-11-22T15:55:39.5857855Z Cache hit for restore-key: gradle-home-v1|Linux-X64|apk[620c74083efa5b88ef904c2356f72d31]-625a444934e4231d723afae075bd432ce03b6cfc
+2026-11-22T15:55:39.8968877Z Received 55731851 of 55731851 (100.0%), 197.6 MBs/sec
+2026-11-22T15:55:39.8969952Z Cache Size: ~53 MB (55731851 B)
+2026-11-22T15:55:39.8993086Z [command]/usr/bin/tar -xf /home/runner/work/_temp/f2d0d1c6-d66f-4f6a-bba7-2502d2ccd2cc/cache.tzst -P -C /home/runner/work/LoLTube/LoLTube --use-compress-program unzstd
+2026-11-22T15:55:40.0662639Z Cache restored successfully
+2026-11-22T15:55:40.0691037Z Restored cache entry with key gradle-home-v1|Linux-X64|apk[620c74083efa5b88ef904c2356f72d31]-72afd35d097b00450bb5b624a86e2203bd86e6de to /home/runner/.gradle/caches,/home/runner/.gradle/notifications,/home/runner/.gradle/.setup-gradle in 607ms
+2026-11-22T15:55:40.1651191Z Cache hit for: gradle-generated-gradle-jars-v1-d6d47bedd9337a0be6f3a426277e63ee
+2026-11-22T15:55:40.1676299Z Cache hit for: gradle-kotlin-dsl-v1-5168d74bf1b20490e1a2a0a3a992604d
+2026-11-22T15:55:40.1693933Z Cache hit for: gradle-transforms-v1-820a874a35737a1fa8a0fe1c274a31de
+2026-11-22T15:55:40.1711427Z Cache hit for: gradle-instrumented-jars-v1-c70e1bb5eb11607db81287095b23c3c3
+2026-11-22T15:55:40.1733762Z Cache hit for: gradle-groovy-dsl-v1-3de882a6c25e47e106e83c3b8d1ae819
+2026-11-22T15:55:40.1739477Z Cache hit for: gradle-dependencies-v1-c22c02a1d943c85b68503b08ef569f7f
+2026-11-22T15:55:40.2840123Z Received 90405 of 90405 (100.0%), 1.8 MBs/sec
+2026-11-22T15:55:40.2863650Z Cache Size: ~0 MB (90405 B)
+2026-11-22T15:55:40.2876396Z [command]/usr/bin/tar -xf /home/runner/work/_temp/fd88af32-5795-41bf-8108-f8bbc32a9316/cache.tzst -P -C /home/runner/work/LoLTube/LoLTube --use-compress-program unzstd
+2026-11-22T15:55:40.3106135Z Cache restored successfully
+2026-11-22T15:55:40.3108306Z Restored cache entry with key gradle-instrumented-jars-v1-c70e1bb5eb11607db81287095b23c3c3 to /home/runner/.gradle/caches/jars-*/*/ in 240ms
+2026-11-22T15:55:40.3450645Z Received 109099 of 109099 (100.0%), 0.8 MBs/sec
+2026-11-22T15:55:40.3451187Z Cache Size: ~0 MB (109099 B)
+2026-11-22T15:55:40.4297498Z Received 144864 of 144864 (100.0%), 0.8 MBs/sec
+2026-11-22T15:55:40.4318243Z Cache Size: ~0 MB (144864 B)
+2026-11-22T15:55:40.6541489Z [command]/usr/bin/tar -xf /home/runner/work/_temp/a1de5565-f013-4c8b-b9bf-3d4ae844c1e0/cache.tzst -P -C /home/runner/work/LoLTube/LoLTube --use-compress-program unzstd
+2026-11-22T15:55:40.7338165Z Cache restored successfully
+2026-11-22T15:55:40.7579218Z Restored cache entry with key gradle-kotlin-dsl-v1-5168d74bf1b20490e1a2a0a3a992604d to /home/runner/.gradle/caches/*/kotlin-dsl/accessors/*/,/home/runner/.gradle/caches/*/kotlin-dsl/scripts/*/ in 686ms
+2026-11-22T15:55:40.7928951Z [command]/usr/bin/tar -xf /home/runner/work/_temp/8728d482-9a4a-42bf-85f6-639ef9861a80/cache.tzst -P -C /home/runner/work/LoLTube/LoLTube --use-compress-program unzstd
+2026-11-22T15:55:40.8585776Z Cache restored successfully
+2026-11-22T15:55:40.8805034Z Restored cache entry with key gradle-groovy-dsl-v1-3de882a6c25e47e106e83c3b8d1ae819 to /home/runner/.gradle/caches/*/groovy-dsl/*/ in 810ms
+2026-11-22T15:55:41.2176763Z Received 188743680 of 351612409 (53.7%), 178.6 MBs/sec
+2026-11-22T15:55:41.2302231Z Received 33751838 of 37946142 (88.9%), 31.9 MBs/sec
+2026-11-22T15:55:41.2380826Z Received 125829120 of 252430134 (49.8%), 119.9 MBs/sec
+2026-11-22T15:55:41.3311068Z Received 37946142 of 37946142 (100.0%), 32.6 MBs/sec
+2026-11-22T15:55:41.3313342Z Cache Size: ~36 MB (37946142 B)
+2026-11-22T15:55:41.5051243Z [command]/usr/bin/tar -xf /home/runner/work/_temp/4cb8ff24-3d44-4af8-ba05-1f223e8a9fe4/cache.tzst -P -C /home/runner/work/LoLTube/LoLTube --use-compress-program unzstd
+2026-11-22T15:55:41.8870177Z Cache restored successfully
+2026-11-22T15:55:41.9031914Z Restored cache entry with key gradle-generated-gradle-jars-v1-d6d47bedd9337a0be6f3a426277e63ee to /home/runner/.gradle/caches/8.7/generated-gradle-jars/gradle-api-8.7.jar in 1834ms
+2026-11-22T15:55:41.9682118Z Received 252430134 of 252430134 (100.0%), 139.1 MBs/sec
+2026-11-22T15:55:41.9684085Z Cache Size: ~241 MB (252430134 B)
+2026-11-22T15:55:41.9862432Z Received 351612409 of 351612409 (100.0%), 188.7 MBs/sec
+2026-11-22T15:55:41.9862968Z Cache Size: ~335 MB (351612409 B)
+2026-11-22T15:55:41.9930381Z [command]/usr/bin/tar -xf /home/runner/work/_temp/e1c5e66d-12d7-4d27-baec-aba4dcbd3136/cache.tzst -P -C /home/runner/work/LoLTube/LoLTube --use-compress-program unzstd
+2026-11-22T15:55:42.0146027Z [command]/usr/bin/tar -xf /home/runner/work/_temp/e2ce8d1c-c618-40ce-969c-077f0d327c2e/cache.tzst -P -C /home/runner/work/LoLTube/LoLTube --use-compress-program unzstd
+2026-11-22T15:55:42.5356292Z Cache restored successfully
+2026-11-22T15:55:42.5531511Z Restored cache entry with key gradle-dependencies-v1-c22c02a1d943c85b68503b08ef569f7f to /home/runner/.gradle/caches/modules-*/files-*/*/*/*/* in 2483ms
+2026-11-22T15:55:43.6464316Z Cache restored successfully
+2026-11-22T15:55:43.6563463Z Restored cache entry with key gradle-transforms-v1-820a874a35737a1fa8a0fe1c274a31de to /home/runner/.gradle/caches/transforms-4/*/,/home/runner/.gradle/caches/*/transforms/*/ in 3586ms
+2026-11-22T15:55:43.6778955Z ##[endgroup]
+2026-11-22T15:55:43.6857336Z ##[group]All Gradle Wrapper jars are valid
+2026-11-22T15:55:43.6858326Z ✓ Found known Gradle Wrapper JAR files:
+2026-11-22T15:55:43.6859073Z   cb0da6751c2b753a16ac168bb354870ebb1e162e9083f116729cec9c781156b8 gradle/wrapper/gradle-wrapper.jar
+2026-11-22T15:55:43.6859786Z ##[endgroup]
