@@ -40,10 +40,9 @@ class SafeDataSource(
     private var source: DataSource? = null
 
     override fun addTransferListener(transferListener: TransferListener) {
-        try {
-            baseFactory.addTransferListener(transferListener)
-        } catch (_: Throwable) {
-        }
+        // Required by the DataSource interface. Media3 1.4.1's Factory has no
+        // forwarding hook, so this is a no-op here — bandwidth estimation uses
+        // MediaSource load events, which flow through this wrapper untouched.
     }
 
     override fun open(dataSpec: DataSpec): Long {
@@ -111,13 +110,6 @@ class SafeDataSource(
     /** Factory wrapper so [androidx.media3.exoplayer.source.DefaultMediaSourceFactory] builds us. */
     class Factory(private val base: DataSource.Factory) : DataSource.Factory {
         override fun createDataSource(): DataSource = SafeDataSource(base)
-
-        override fun addTransferListener(transferListener: TransferListener) {
-            try {
-                base.addTransferListener(transferListener)
-            } catch (_: Throwable) {
-            }
-        }
     }
 
     private companion object {
