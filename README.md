@@ -83,7 +83,7 @@ cd LoLTube
 ./gradlew assembleRelease
 ```
 
-Requirements: JDK 17, any Android SDK with platform 34. CI builds release APKs debug-signed unless a `LOLTUBE_KEYSTORE_BASE64` secret is configured.
+Requirements: JDK 17, any Android SDK with platform 34. CI signs release APKs with the keystore stored in the `LOLTUBE_KEYSTORE_BASE64` secret — the same key is used for every release, so new builds install over old ones without losing settings/watch progress.
 
 - `minSdk 28` (Android 9) · `targetSdk 34` · Kotlin 2.0 · Jetpack Compose · Media3 1.4.1
 
