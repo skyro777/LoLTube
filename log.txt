@@ -1,0 +1,31 @@
+[15:42:39.446] [Harvest] captured [m3u8]
+
+https://moon.goldenkite.top/vd
+
+/QUMYVOVMaHRzbjFEbzg3V3NmOHh2dzo5ajI5UVo2Q0JDaEJYdEV1
+
+TUxzM1N3cnBzdUVsMjd3LVEwYUxUXzgybHEw/sd/77/index -s1080p-v1-a1.m3u8?s=s1.17954
+
+[15:42:41.625] [Harvest] captured 28 subtitle
+
+track(s) from page
+
+[15:42:44.012] [Verify] [Vidcore] OK m3u8-master:
+
+https://moon.goldenkite.top/vd
+
+/QUMYVOVMaHRzbjFEbzg3V3NmOHh2dzo5ajI5UVo2Q0JDaEJYdEV1 TUxzM1N3cnBzdUVsMjd3LVEwYUxUXzgybHEw/master.m3u8?s=s1
+
+.179
+
+[15:42:44.091] [PlaybackCache] opening segment cache at /data/user/0/com.loltube.app/cache/media_cache
+
+[15:42:44.233] [Player] quality mode -> MAX (manifest cap 2160p)
+
+[15:42:44.234] [Player] quality mode -> MAX (manifest cap 2160p)
+
+[15:42:45.941] [TurboPrefetch] playlist parsed: 1727 segments, warming ahead of the playhead
+
+[15:42:48.813] [Player] ERROR playback error:
+
+ERROR_CODE_FAILED_RUNTIME_CHECK
