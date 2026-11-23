@@ -424,7 +424,7 @@ class PlayerViewModel(
         val pref = settings.preferredSubtitleLang.lowercase()
         val pick = pool.firstOrNull { s -> s.language?.lowercase()?.startsWith(pref) == true }
             ?: pool.firstOrNull { s -> s.display.lowercase().startsWith(pref) }
-            ?: pool.firstOrNull {
+            ?: pool.firstOrNull { s ->
                 s.language?.lowercase() == "en" || s.display.contains("english", true)
             }
             ?: return

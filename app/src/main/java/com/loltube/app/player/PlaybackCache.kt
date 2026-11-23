@@ -73,7 +73,7 @@ object PlaybackCache {
     /** As much as useful, but never more than ~35% of free disk (min 250 MB, max 800 MB). */
     private fun diskBudget(dir: File): Long = runCatching {
         dir.mkdirs()
-        val free = android.os.StatFs(dir).availableBytes
+        val free = android.os.StatFs(dir.absolutePath).availableBytes
         val byFree = (free * 0.35f).toLong()
         maxOf(MIN_BYTES, minOf(MAX_BYTES, byFree))
     }.getOrDefault(400L * 1024 * 1024)

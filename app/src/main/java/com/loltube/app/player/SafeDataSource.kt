@@ -2,11 +2,11 @@ package com.loltube.app.player
 
 import android.net.Uri
 import androidx.media3.common.PlaybackException
-import androidx.media3.common.TransferListener
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.DataSource
 import androidx.media3.datasource.DataSourceException
 import androidx.media3.datasource.DataSpec
+import androidx.media3.datasource.TransferListener
 import com.loltube.app.util.AppLog
 import java.io.IOException
 import java.io.InterruptedIOException
