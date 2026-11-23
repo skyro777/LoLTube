@@ -118,19 +118,35 @@ class MappleStreamInterceptor : Interceptor {
     }
 
     companion object {
-        /** Client for playback: keep-alive + mapple fragment proxy support +
-         *  master-playlist resolution capping. Long read timeout: 4K segments are
-         *  big and some CDN nodes are slow — a short timeout kills in-flight
-         *  segment loads and surfaces as a rebuffer. */
-        fun playbackClient(headers: Map<String, String>): OkHttpClient {
-            return NetBase.newBuilder()
+        /**
+         * Client for playback: keep-alive + mapple fragment proxy support +
+         * master-playlist resolution capping.
+         *
+         * @param parallel raises per-host concurrency to 16 with a 16-connection
+         * pool: the player's own loader plus the 4 prefetch workers must be able
+         * to fetch 4K segments from the same CDN host at the same time (OkHttp's
+         * default 5-per-host limit serializes them and starves the flywheel).
+         *
+         * Long read timeout: 4K segments are big and some CDN nodes are slow —
+         * a short timeout kills in-flight segment loads and surfaces as a
+         * rebuffer.
+         */
+        fun playbackClient(headers: Map<String, String>, parallel: Boolean = false): OkHttpClient {
+            val builder = NetBase.newBuilder()
                 .addInterceptor(MappleStreamInterceptor())
                 .addInterceptor(ManifestCapInterceptor())
-                .connectTimeout(15, TimeUnit.SECONDS)
-                .readTimeout(45, TimeUnit.SECONDS)
+                .connectTimeout(12, TimeUnit.SECONDS)
+                .readTimeout(90, TimeUnit.SECONDS)
                 .callTimeout(0, TimeUnit.MILLISECONDS)
                 .retryOnConnectionFailure(true)
-                .build()
+                .connectionPool(okhttp3.ConnectionPool(if (parallel) 16 else 5, 5, TimeUnit.MINUTES))
+            if (parallel) {
+                val dispatcher = okhttp3.Dispatcher()
+                dispatcher.maxRequests = 32
+                dispatcher.maxRequestsPerHost = 16
+                builder.dispatcher(dispatcher)
+            }
+            return builder.build()
         }
 
         private val NetBase: OkHttpClient get() = com.loltube.app.data.Net.client

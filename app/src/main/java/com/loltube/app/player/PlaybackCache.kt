@@ -23,17 +23,23 @@ import java.net.URI
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
+import java.util.concurrent.ScheduledExecutorService
+import java.util.concurrent.TimeUnit
 
 /**
  * The anti-buffering pipeline.
  *
- *  1. [PlaybackCache]     - a 400 MB LRU disk cache holding HLS segments.
- *  2. [TurboPrefetcher]   - watches what the player loads and downloads the NEXT
- *                           segments in parallel (3 workers) straight into the
- *                           cache, so the player reads them from disk instantly.
- *                           ExoPlayer normally pulls segments one-by-one over a
- *                           single connection; this turns the first 60-90s of
- *                           the buffer into 3 parallel downloads.
+ *  1. [PlaybackCache]     - up to an 800 MB LRU disk cache holding HLS segments.
+ *  2. [TurboPrefetcher]   - watches what the player loads and downloads ahead of
+ *                           the playhead with FOUR parallel workers, up to 4
+ *                           minutes of media, straight into the cache. ExoPlayer
+ *                           itself pulls segments one-by-one over a single
+ *                           connection; the player's RAM buffer is capped at
+ *                           30-120s by profile, but the DISK flywheel keeps
+ *                           filling beyond it. Every segment the player needs is
+ *                           then a local disk read (instant) instead of a network
+ *                           round-trip — that is what actually removes the
+ *                           rebuffering, especially for 4K (16-40 Mbps).
  *  3. [CapPolicy] + [ManifestCapInterceptor] - when the user caps quality, the
  *                           master playlist itself is rewritten (variants above
  *                           the cap are removed) so no oversized variant can
@@ -42,7 +48,8 @@ import java.util.concurrent.Executors
 @UnstableApi
 object PlaybackCache {
     private const val TAG = "PlaybackCache"
-    private const val MAX_BYTES = 400L * 1024 * 1024
+    private const val MIN_BYTES = 250L * 1024 * 1024
+    private const val MAX_BYTES = 800L * 1024 * 1024
 
     @Volatile
     private var instance: SimpleCache? = null
@@ -50,16 +57,26 @@ object PlaybackCache {
     fun get(context: Context): SimpleCache {
         return instance ?: synchronized(this) {
             instance ?: run {
-                val dir = File(context.applicationContext.cacheDir, "media_cache")
-                AppLog.d(TAG, "opening segment cache at ${dir.absolutePath}")
+                val app = context.applicationContext
+                val dir = File(app.cacheDir, "media_cache")
+                val budget = diskBudget(dir)
+                AppLog.d(TAG, "opening segment cache at ${dir.absolutePath} (budget ${budget / (1024 * 1024)} MB)")
                 SimpleCache(
                     dir,
-                    LeastRecentlyUsedCacheEvictor(MAX_BYTES),
-                    StandaloneDatabaseProvider(context.applicationContext),
+                    LeastRecentlyUsedCacheEvictor(budget),
+                    StandaloneDatabaseProvider(app),
                 ).also { instance = it }
             }
         }
     }
+
+    /** As much as useful, but never more than ~35% of free disk (min 250 MB, max 800 MB). */
+    private fun diskBudget(dir: File): Long = runCatching {
+        dir.mkdirs()
+        val free = android.os.StatFs(dir).availableBytes
+        val byFree = (free * 0.35f).toLong()
+        maxOf(MIN_BYTES, minOf(MAX_BYTES, byFree))
+    }.getOrDefault(400L * 1024 * 1024)
 }
 
 /** Current resolution cap; also read by [ManifestCapInterceptor]. */
@@ -152,13 +169,23 @@ class ManifestCapInterceptor : Interceptor {
 }
 
 /**
- * Parallel segment read-ahead. Attached to the player as an AnalyticsListener:
+ * Parallel segment read-ahead — the disk "flywheel".
+ *
+ * Attached to the player as an AnalyticsListener:
  *  - when a *media playlist* finishes loading it is read back from the cache and
  *    parsed into a segment list;
- *  - whenever a segment finishes loading, the following ~10 segments (up to 90s
- *    of media) are downloaded in parallel by 3 workers directly into the
- *    SimpleCache - the player then hits the cache for them;
- *  - throttles itself off when the player already has > 50s buffered.
+ *  - whenever a segment finishes loading (and on a 3s heartbeat), the NEXT
+ *    segments — up to [READ_AHEAD_MS] of media ahead of the playhead — are
+ *    downloaded in parallel by 4 workers directly into the SimpleCache, so the
+ *    player hits the disk instead of the network for them;
+ *  - a segment the player itself is currently fetching is never touched (the
+ *    prefetch starts at index+1), so the player's own single connection keeps
+ *    streaming undisturbed while the workers open 4 MORE connections to the
+ *    same CDN (per-host limit was raised to 16 for exactly this).
+ *
+ * All callbacks are exception-proof: they run on the player's playback thread,
+ * and any uncaught RuntimeException there is a fatal
+ * ERROR_CODE_FAILED_RUNTIME_CHECK (the crash the user saw).
  */
 @UnstableApi
 class TurboPrefetcher(
@@ -169,9 +196,13 @@ class TurboPrefetcher(
     private val positionMs: () -> Long,
 ) : AnalyticsListener {
 
-    private val executor: ExecutorService = Executors.newFixedThreadPool(3) { r ->
+    private val executor: ExecutorService = Executors.newFixedThreadPool(4) { r ->
         Thread(r, "loltube-prefetch").apply { isDaemon = true }
     }
+    private val heartbeat: ScheduledExecutorService =
+        Executors.newSingleThreadScheduledExecutor { r ->
+            Thread(r, "loltube-prefetch-hb").apply { isDaemon = true }
+        }
     private val cacheFactory: CacheDataSource.Factory = cacheDataSourceFactory
     private val inFlight: MutableSet<String> = ConcurrentHashMap.newKeySet()
     private val done: MutableSet<String> = ConcurrentHashMap.newKeySet()
@@ -185,15 +216,32 @@ class TurboPrefetcher(
     @Volatile
     private var stopped = false
 
+    init {
+        heartbeat.scheduleAtFixedRate(
+            {
+                try {
+                    if (!stopped && segments.isNotEmpty()) scheduleFrom(indexForPosition() + 1)
+                } catch (_: Throwable) {
+                }
+            },
+            3, 3, TimeUnit.SECONDS,
+        )
+    }
+
+    // Playback-thread callbacks: NEVER let an exception escape.
     override fun onLoadCompleted(
         eventTime: AnalyticsListener.EventTime,
         loadEventInfo: LoadEventInfo,
         mediaLoadData: MediaLoadData,
     ) {
-        if (stopped) return
-        when (mediaLoadData.dataType) {
-            C.DATA_TYPE_MANIFEST -> onManifestLoaded(loadEventInfo.dataSpec.uri.toString())
-            C.DATA_TYPE_MEDIA -> onSegmentLoaded(loadEventInfo.uri.toString())
+        try {
+            if (stopped) return
+            when (mediaLoadData.dataType) {
+                C.DATA_TYPE_MANIFEST -> onManifestLoaded(loadEventInfo.dataSpec.uri.toString())
+                C.DATA_TYPE_MEDIA -> onSegmentLoaded(loadEventInfo.uri.toString())
+            }
+        } catch (t: Throwable) {
+            AppLog.e(TAG, "onLoadCompleted guard", t)
         }
     }
 
@@ -201,10 +249,24 @@ class TurboPrefetcher(
 
     private fun onManifestLoaded(url: String) {
         if (!url.contains(".m3u8", ignoreCase = true)) return // only HLS
-        executor.execute {
-            if (stopped) return@execute
-            val text = readViaCache(url) ?: return@execute
+        tryExecute {
+            val text = readViaCache(url) ?: return@tryExecute
             if (text.contains("#EXTINF")) parseMediaPlaylist(text, url)
+        }
+    }
+
+    private fun tryExecute(body: () -> Unit) {
+        try {
+            executor.execute {
+                if (stopped) return@execute
+                try {
+                    body()
+                } catch (t: Throwable) {
+                    AppLog.d(TAG, "prefetch step failed: ${t.message?.take(60)}")
+                }
+            }
+        } catch (_: Throwable) {
+            // pool already shut down during a race with stop()
         }
     }
 
@@ -267,6 +329,8 @@ class TurboPrefetcher(
         if (positionMs() < 20_000L) {
             AppLog.d(TAG, "playlist parsed: ${urls.size} segments, warming ahead of the playhead")
             scheduleFrom(1)
+        } else {
+            scheduleFrom(indexForPosition() + 1)
         }
     }
 
@@ -286,18 +350,30 @@ class TurboPrefetcher(
         if (idx >= 0) scheduleFrom(idx + 1)
     }
 
+    /** Media-time index of the current playhead in the parsed segment list. */
+    private fun indexForPosition(): Int {
+        val pos = positionMs()
+        val durs = segDurationsMs
+        if (durs.isEmpty()) return 0
+        var t = 0.0
+        for (i in durs.indices) {
+            t += durs[i]
+            if (t > pos) return i
+        }
+        return durs.size
+    }
+
     private fun scheduleFrom(startIndex: Int) {
         if (stopped || !enabled()) return
-        if (bufferAheadMs() > 50_000L) return
         val segs = segments
         val durs = segDurationsMs
         var msAhead = 0.0
         var scheduled = 0
         var i = startIndex.coerceIn(0, segs.size)
-        while (i < segs.size && scheduled < 10) {
+        while (i < segs.size && scheduled < MAX_INFLIGHT) {
             val u = segs[i]
             msAhead += durs.getOrElse(i) { 6000.0 }
-            if (i > startIndex && msAhead > 90_000.0) break
+            if (i > startIndex && msAhead > READ_AHEAD_MS) break
             if (!done.contains(u) && !inFlight.contains(u)) {
                 inFlight.add(u)
                 scheduled++
@@ -334,10 +410,21 @@ class TurboPrefetcher(
         stopped = true
         segments = emptyList()
         segDurationsMs = emptyList()
-        executor.shutdownNow()
+        try {
+            executor.shutdownNow()
+        } catch (_: Throwable) {
+        }
+        try {
+            heartbeat.shutdownNow()
+        } catch (_: Throwable) {
+        }
     }
 
     private companion object {
         private const val TAG = "TurboPrefetch"
+        /** How much media to keep warm in the disk cache ahead of the playhead. */
+        private const val READ_AHEAD_MS = 240_000.0 // 4 minutes
+        /** Max simultaneously scheduled prefetch tasks (4 run in parallel). */
+        private const val MAX_INFLIGHT = 12
     }
 }

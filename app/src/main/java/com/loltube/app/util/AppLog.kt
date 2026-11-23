@@ -25,7 +25,28 @@ object AppLog {
 
     fun e(tag: String, msg: String, t: Throwable? = null) {
         android.util.Log.e("LoLTube/$tag", msg, t)
-        val line = "[${fmt.format(Date())}] [$tag] ERROR $msg${t?.let { " :: ${it.message}" } ?: ""}"
+        val line = when (t) {
+            null -> "[${fmt.format(Date())}] [$tag] ERROR $msg"
+            else -> {
+                // Full cause chain + top stack frames of each: the ONLY way the
+                // copied log.txt reveals the true root cause of playback errors
+                // (ERROR_CODE_FAILED_RUNTIME_CHECK carries the real exception in
+                // its cause chain; without this we only ever saw the code name).
+                val chain = generateSequence<Throwable>(t) { it.cause }
+                    .take(4)
+                    .joinToString(" <- ") { c ->
+                        "${c.javaClass.simpleName}(${c.message?.take(100)})"
+                    }
+                val frames = generateSequence<Throwable>(t) { it.cause }
+                    .take(2)
+                    .flatMap { c -> c.stackTrace.take(6).asSequence() }
+                    .joinToString(" ") { f ->
+                        "${f.className.substringAfterLast('.')}.${f.methodName}:${f.lineNumber}"
+                    }
+                    .take(700)
+                "[${fmt.format(Date())}] [$tag] ERROR $msg :: $chain @ $frames"
+            }
+        }
         synchronized(buffer) {
             buffer.addLast(line)
             while (buffer.size > 800) buffer.removeFirst()

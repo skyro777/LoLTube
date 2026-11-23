@@ -13,18 +13,18 @@ Grab the APK from the [**Latest Build** release](../../releases/tag/latest):
 
 Every push to `main` rebuilds it automatically (GitHub Actions).
 
-## What's new in v0.2.0
+## What's new in v0.4.0
 
-- **Android 9 support** — minSdk lowered to 28 so older TVs install it.
-- **Fixed silent audio** — the hardware-decoder filter no longer strips software audio decoders (that's what muted playback).
-- **True fullscreen** — the player now draws edge-to-edge under a hidden status bar (no more top black strip), extends into display cutouts, and **auto-rotates to landscape** on phones/tablets.
-- **Gestures** — swipe up/down on the **left half to change brightness**, on the **right half for volume**, horizontally to scrub; double-tap left/right edges = ±10 s. D-pad up/down = volume on TV.
-- **Search fixed** — now powered by the same Cinemeta backend that feeds the home screen (with IMDb suggest as fallback), works on every tab.
-- **Episode fix** — resuming a mostly-watched episode restarts it instead of rolling into the next one (S1E1 stays S1E1).
-- **Vidcore is the default source** (vidfast's CDN is currently slower); old installs migrate automatically.
-- **Stronger anti-buffering** — warm-started ABR (persists your measured bandwidth between sessions), deeper back-buffer (30 s), 45 s read timeout for slow CDN nodes, and automatic 1080p fallback if your line genuinely can't sustain 4K. Optional **Deep 4K buffer profile (45–120 s)** in Settings.
-- **Subtitles** — the stream's own embedded subtitle tracks now appear in the Subs menu (perfectly synced), alongside multi-language downloads.
-- **Modernized UI** — hero carousel, redesigned details/settings, animated focus, new theme.
+- **Fixed the v0.3 playback crash** (`ERROR_CODE_FAILED_RUNTIME_CHECK`). Root cause: the auto-subtitle attach restarted the media item ~4 s into playback, cancelling in-flight segment loads — that race inside OkHttp/CacheDataSource threw a runtime exception which Media3 treats as fatal. Subtitles now ship **with the first media item before playback starts** (no restart at all), and the whole data pipeline runs through a new crash-proof `SafeDataSource` that converts any runtime-exception race into a **retriable** error instead of a fatal one.
+- **Self-healing player** — if playback still ever errors, the recovery ladder kicks in automatically: re-prepare at position → rebuild in fail-safe mode (direct network, no cache) → switch source. 20 s of clean playback re-arms it. You should never see a dead player screen again.
+- **Bigger no-buffer engine (the "disk flywheel")** — cache up to 800 MB (auto-fitted to free disk), **4 parallel prefetch workers** (was 3) keeping **4 minutes** of media warm ahead of the playhead (was 90 s), plus a 3 s heartbeat. The player's RAM buffer is 30–120 s, but the disk keeps filling far beyond it — every segment becomes a local disk read, which is what actually removes 4K rebuffering.
+- **16 requests per host** (OkHttp dispatcher + connection pool): the player plus the prefetch workers now stream from the same CDN concurrently instead of queueing behind OkHttp's default 5.
+- **Memory-aware buffer budgets** — the byte target now respects the device's memory class (no more silently swapping on low-RAM TVs).
+- **Root-cause logging** — playback errors now log the full exception chain + stack frames to the in-app diagnostics log, so any future issue is diagnosable from the copied log.txt.
+
+## What was new in v0.3.0
+
+- Universal aspect-ratio fill on every video (surface-level scaling that codecs can't ignore), self-healing immersive fullscreen (status bar re-hides on resume/focus), subtitle pipeline rework, no-buffer engine v2 (segment disk cache + parallel prefetch). *Withdrawn within hours: playback crashed with ERROR_CODE_FAILED_RUNTIME_CHECK — fixed in v0.4.0 above.*
 
 ## Why it plays 4K smoothly (when the websites stutter)
 
@@ -83,9 +83,9 @@ cd LoLTube
 ./gradlew assembleRelease
 ```
 
-Requirements: JDK 17, any Android SDK with platform 34. The release signing keystore is committed (`keystore/loltube-release.p12`, password `loltube`) so CI and local builds produce consistently-signed, upgradable APKs. Rotate it if you fork this for public distribution.
+Requirements: JDK 17, any Android SDK with platform 34. CI builds release APKs debug-signed unless a `LOLTUBE_KEYSTORE_BASE64` secret is configured.
 
-- `minSdk 29` (Android 10) · `targetSdk 34` · Kotlin 2.0 · Jetpack Compose · Media3 1.4.1
+- `minSdk 28` (Android 9) · `targetSdk 34` · Kotlin 2.0 · Jetpack Compose · Media3 1.4.1
 
 ## Troubleshooting
 
@@ -93,6 +93,7 @@ Requirements: JDK 17, any Android SDK with platform 34. The release signing keys
 - **Mapple unavailable** — Mapple needs the TMDB id (fetched automatically from Cinemeta) and is pickier about connections; Vidfast/Vidcore are more reliable.
 - **Buffering on old devices** — Settings → Buffer profile → *Low memory*, and/or cap quality at 1080p (software decode can't keep up with 4K on very old chips).
 - Subtitles don't load — the `wyzie` endpoint sometimes rate-limits; reselect from the Subs menu.
+- **Reporting a playback problem** — copy the diagnostics log (Settings → Diagnostics): since v0.4.0 it contains the full error chain and stack frames, which pinpoints the exact cause.
 
 ## Legal
 

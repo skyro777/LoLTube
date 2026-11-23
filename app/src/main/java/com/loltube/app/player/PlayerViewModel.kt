@@ -141,6 +141,13 @@ class PlayerViewModel(
     @Volatile private var hadFirstReady = false
     @Volatile private var switchingSource = false
 
+    // self-healing recovery ladder (see onPlayerError):
+    // 0 = clean, 1 = re-prepared once, 2 = rebuilt in fail-safe mode, 3 = provider
+    // switch attempted. Resets to 0 after 20s of clean playback.
+    @Volatile private var recoveryStage = 0
+    @Volatile private var cleanSinceMs = 0L
+    @Volatile private var preAttachTried = false
+
     private val _currentRequest = MutableStateFlow(request)
     val activeRequest: StateFlow<PlaybackRequest> get() = _currentRequest.asStateFlow()
 
@@ -158,6 +165,7 @@ class PlayerViewModel(
                     hadFirstReady = true
                     bufferingSinceMs = 0
                     stallStage = 0
+                    if (cleanSinceMs == 0L) cleanSinceMs = android.os.SystemClock.elapsedRealtime()
                 }
 
                 Player.STATE_ENDED -> onEnded()
@@ -194,20 +202,61 @@ class PlayerViewModel(
         }
 
         override fun onPlayerError(error: PlaybackException) {
-            AppLog.e("Player", "playback error: ${error.errorCodeName}")
+            logPlaybackError(error)
             val played = _positionMs.value
             val stream = currentStream
+
+            // Long sessions: the CDN token (the ?s=... in the m3u8 URL) expires
+            // after ~1h — re-resolve the stream at the current position.
             if (!autoReResolved && stream != null && played > 5 * 60_000) {
                 autoReResolved = true
                 _message.value = "Stream link expired — reconnecting…"
                 val pos = _positionMs.value
                 startResolve(currentRequest.copy(startAtMs = pos), reusePlayer = true)
-            } else {
-                _message.value = "Playback error: ${error.errorCodeName}"
+                return
+            }
+
+            // Early failures: escalate the self-healing ladder so playback
+            // ALWAYS comes back instead of dead-stopping (each step re-arms;
+            // 20s of clean playback resets to stage 0).
+            when (recoveryStage) {
+                0 -> {
+                    recoveryStage = 1
+                    _message.value = "Playback hiccup — reconnecting…"
+                    AppLog.d("Recovery", "stage 1: re-preparing at position")
+                    reprepareAtPosition()
+                }
+
+                1 -> {
+                    recoveryStage = 2
+                    _message.value = "Rebuilding player (fail-safe mode)…"
+                    AppLog.d("Recovery", "stage 2: rebuilding without cache/prefetch")
+                    rebuildInSafeMode()
+                }
+
+                else -> {
+                    recoveryStage = 3
+                    if (settings.providerOrder.size >= 2 && stream != null && !switchingSource) {
+                        _message.value = "Trying another source…"
+                        autoSwitchProvider()
+                    } else {
+                        _message.value = "Playback error: ${error.errorCodeName}"
+                    }
+                }
             }
         }
 
         override fun onTracksChanged(tracks: androidx.media3.common.Tracks) {
+            // runs on the player's application thread; guard anyway — an
+            // exception here must never kill playback
+            try {
+                onTracksChangedSafe(tracks)
+            } catch (t: Throwable) {
+                AppLog.e("Player", "onTracksChanged guard", t)
+            }
+        }
+
+        private fun onTracksChangedSafe(tracks: androidx.media3.common.Tracks) {
             val p = player.value ?: return
             val langs = mutableListOf<String>()
             for (gi in 0 until tracks.groups.size) {
@@ -349,16 +398,57 @@ class PlayerViewModel(
         viewModelScope.launch {
             val wyzieSubs = Wyzie.fetch(req.imdbId, req.season, req.episode)
             mergeSubs(wyzieSubs)
-            // Embedded manifest tracks are auto-picked in onTracksChanged (they only
-            // exist once the player has parsed the manifest).
-            if (settings.subtitlesEnabled && activeSubtitle == null && _activeSubLabel.value == null) {
-                val pref = settings.preferredSubtitleLang.lowercase()
-                val match = _subs.value.firstOrNull { s ->
-                    s.language?.lowercase() == pref || s.display.lowercase().startsWith(pref)
-                } ?: _subs.value.firstOrNull { it.display.contains("english", true) }
-                if (match != null) selectSubtitle(match)
-            }
+            // Attach BEFORE playback starts if we can (no disruption); once the
+            // player is running we do NOT auto re-attach — swapping the media
+            // item mid-playback cancels all in-flight loads and is exactly the
+            // race that crashed ExoPlayer with ERROR_CODE_FAILED_RUNTIME_CHECK.
+            // The subtitle menu still allows manual selection, and embedded
+            // manifest tracks auto-select via track parameters (no restart).
+            if (_phase.value !is Phase.Ready) preAttachSubtitle()
         }
+    }
+
+    /**
+     * Download the preferred subtitle BEFORE the first prepare so it ships with
+     * the initial MediaItem — subtitles appear immediately and nothing has to
+     * be restarted later. Bounded to 4s: a slow subtitle host must never delay
+     * the video.
+     */
+    private suspend fun preAttachSubtitle() {
+        if (preAttachTried) return
+        if (!settings.subtitlesEnabled) return
+        if (activeSubtitle != null || _activeSubLabel.value != null) return
+        val pool = providerSubs.ifEmpty { _subs.value }
+        if (pool.isEmpty()) return // tried-flag stays false: a later listing can still attach
+
+        val pref = settings.preferredSubtitleLang.lowercase()
+        val pick = pool.firstOrNull { s -> s.language?.lowercase()?.startsWith(pref) == true }
+            ?: pool.firstOrNull { s -> s.display.lowercase().startsWith(pref) }
+            ?: pool.firstOrNull {
+                s.language?.lowercase() == "en" || s.display.contains("english", true)
+            }
+            ?: return
+        preAttachTried = true // genuinely attempting a download now
+
+        val dl = kotlinx.coroutines.withTimeoutOrNull(4_000) { Wyzie.download(pick) }
+        if (dl == null) {
+            AppLog.d("Subs", "pre-attach download failed/timed out (${pick.display}) — menu selection stays available")
+            preAttachTried = false // allow a later episode to retry
+            return
+        }
+        activeSubtitle = PlayerEngine.SubtitleSelection(
+            file = dl.first, mime = dl.second,
+            language = pick.language, label = pick.display,
+        )
+        _activeSubLabel.value = pick.display
+        AppLog.d("Subs", "pre-attached \"${pick.display}\" before first prepare")
+    }
+
+    /** Full cause-chain + stack logging so the next log.txt shows root causes. */
+    private fun logPlaybackError(error: PlaybackException) {
+        val chain = generateSequence<Throwable>(error) { it.cause }.take(4)
+            .joinToString(" <- ") { c -> "${c.javaClass.simpleName}(${c.message?.take(90)})" }
+        AppLog.e("Player", "playback error: ${error.errorCodeName} :: $chain", error)
     }
 
     /** Combine the provider-harvested listing with the directly-fetched one. */
@@ -397,6 +487,12 @@ class PlayerViewModel(
             providerSubs = stream.subs
             if (providerSubs.isNotEmpty()) mergeSubs(emptyList())
 
+            // ship the preferred subtitle with the FIRST media item (no
+            // mid-playback restart later)
+            if (activeSubtitle == null) {
+                kotlinx.coroutines.withTimeoutOrNull(4_000) { preAttachSubtitle() }
+            }
+
             val existing = if (reusePlayer) player.value else null
             val p = existing
                 ?: PlayerEngine.build(
@@ -428,6 +524,59 @@ class PlayerViewModel(
             p.playWhenReady = true
             _phase.value = Phase.Ready(stream.provider, stream.kind, stream.allCandidates.size)
         }
+    }
+
+    // ---- self-healing recovery -----------------------------------------------
+
+    /** Recovery stage 1: soft reset — clears the error state and resumes. */
+    private fun reprepareAtPosition() {
+        val p = player.value ?: return
+        try {
+            val pos = _positionMs.value
+            p.seekTo(pos)
+            p.prepare()
+            p.playWhenReady = true
+        } catch (t: Throwable) {
+            AppLog.e("Recovery", "re-prepare failed", t)
+        }
+    }
+
+    /**
+     * Recovery stage 2: rebuild the player in fail-safe mode — no disk cache,
+     * no prefetch, direct network pipeline. Whatever was wrong with the
+     * cache layer is bypassed entirely; playback continues at the same position.
+     */
+    private fun rebuildInSafeMode() {
+        val stream = currentStream ?: return
+        val pos = _positionMs.value
+        prefetcher?.stop()
+        prefetcher = null
+        player.value?.let {
+            runCatching {
+                it.removeListener(playerListener)
+                it.removeAnalyticsListener(analyticsListener)
+                it.release()
+            }
+        }
+        _player.value = null
+
+        val built = PlayerEngine.build(
+            context = context,
+            settings = settings,
+            streamHeaders = stream.headers,
+            prefetchEnabled = { false },
+            safeMode = true,
+        )
+        built.player.addListener(playerListener)
+        built.player.addAnalyticsListener(analyticsListener)
+        _player.value = built.player
+        prefetcher = built.prefetcher
+        PlayerEngine.applyQualityMode(built.player, _qualityMode.value)
+
+        val mediaItem = PlayerEngine.buildMediaItem(stream.url, stream.kind, null, activeSubtitle)
+        built.player.setMediaItem(mediaItem, pos)
+        built.player.prepare()
+        built.player.playWhenReady = true
     }
 
     // ---- stall watchdog -------------------------------------------------------
@@ -501,11 +650,28 @@ class PlayerViewModel(
         viewModelScope.launch {
             while (true) {
                 delay(400)
-                val pl = player.value ?: break
+                val pl = player.value
+                if (pl == null) {
+                    // player is being rebuilt (recovery) — wait, don't die
+                    delay(600)
+                    continue
+                }
                 _positionMs.value = pl.currentPosition.coerceAtLeast(0)
                 if (pl.duration > 0) _durationMs.value = pl.duration
                 _bufferedMs.value = pl.bufferedPosition.coerceAtLeast(0)
                 checkStallWatchdog()
+
+                // 20s of clean playback re-arms the recovery ladder from stage 0
+                if (cleanSinceMs > 0 && recoveryStage > 0 && !switchingSource) {
+                    val now = android.os.SystemClock.elapsedRealtime()
+                    if (now - cleanSinceMs > 20_000) {
+                        AppLog.d("Recovery", "playback stable ${recoveryStage}→0")
+                        recoveryStage = 0
+                    }
+                }
+                if (pl.playbackState != Player.STATE_READY || pl.playWhenReady.not()) {
+                    cleanSinceMs = 0L
+                }
             }
         }
         viewModelScope.launch {
@@ -576,11 +742,11 @@ class PlayerViewModel(
     }
 
     /**
-     * Attach a downloaded sidecar subtitle. Race-free: the download happens first,
-     * and afterwards we re-read the player - if it now exists we re-attach the
-     * media item with the subtitle (the old code stored it for later in a window
-     * where the player could already be playing, so subtitles silently never
-     * appeared).
+     * Attach a downloaded sidecar subtitle (manual selection from the menu).
+     * Sidecar files must ship with the MediaItem, so this restarts the media
+     * item at the current position — a user-triggered action, so a brief
+     * reload is acceptable. Everything is guarded: a failure here must never
+     * leave the player dead.
      */
     fun selectSubtitle(sub: Wyzie.Sub?) {
         if (sub == null) {
@@ -605,15 +771,21 @@ class PlayerViewModel(
             if (p != null) {
                 val stream = currentStream ?: return@launch
                 val pos = _positionMs.value
-                val mediaItem = PlayerEngine.buildMediaItem(stream.url, stream.kind, null, sel)
-                p.setMediaItem(mediaItem, pos)
-                p.prepare()
-                p.playWhenReady = true
-                p.trackSelectionParameters = p.trackSelectionParameters.buildUpon()
-                    .clearOverridesOfType(C.TRACK_TYPE_TEXT)
-                    .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, false)
-                    .setPreferredTextLanguage(sub.language ?: sub.display)
-                    .build()
+                try {
+                    val mediaItem = PlayerEngine.buildMediaItem(stream.url, stream.kind, null, sel)
+                    p.setMediaItem(mediaItem, pos)
+                    p.prepare()
+                    p.playWhenReady = true
+                    p.trackSelectionParameters = p.trackSelectionParameters.buildUpon()
+                        .clearOverridesOfType(C.TRACK_TYPE_TEXT)
+                        .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, false)
+                        .setPreferredTextLanguage(sub.language ?: sub.display)
+                        .build()
+                    recoveryStage = 0 // fresh media item re-arms the ladder
+                } catch (t: Throwable) {
+                    AppLog.e("Subs", "subtitle attach failed (kept playing)", t)
+                    _message.value = "Subtitle attached for next start"
+                }
             }
             // player == null: startResolve picks activeSubtitle up when it builds
         }
@@ -654,6 +826,8 @@ class PlayerViewModel(
     fun retry(provider: ProviderId? = null) {
         releasePlayer()
         autoReResolved = false
+        recoveryStage = 0
+        cleanSinceMs = 0
         viewModelScope.launch {
             settings = SettingsStore.read(context)
             // keep the watched position when switching sources manually
@@ -670,6 +844,9 @@ class PlayerViewModel(
         val req = currentRequest.copy(season = season, episode = episode, startAtMs = 0)
         autoReResolved = false
         embeddedAutoTried = false
+        preAttachTried = false
+        recoveryStage = 0
+        cleanSinceMs = 0
         synchronized(rebufferTimes) { rebufferTimes.clear() }
         bufferingSinceMs = 0
         stallStage = 0
@@ -750,6 +927,7 @@ class PlayerViewModel(
         releasePlayer()
         super.onCleared()
     }
+
 
     companion object {
         fun factory(app: Application, request: PlaybackRequest, provider: ProviderId?): ViewModelProvider.Factory =
