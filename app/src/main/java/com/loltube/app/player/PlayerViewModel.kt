@@ -17,6 +17,7 @@ import com.loltube.app.data.AspectMode
 import com.loltube.app.data.Catalog
 import com.loltube.app.data.Cinemeta
 import com.loltube.app.data.MediaDetails
+import com.loltube.app.data.Net
 import com.loltube.app.data.ProgressStore
 import com.loltube.app.data.QualityMode
 import com.loltube.app.data.SettingsStore
@@ -142,11 +143,67 @@ class PlayerViewModel(
     @Volatile private var switchingSource = false
 
     // self-healing recovery ladder (see onPlayerError):
-    // 0 = clean, 1 = re-prepared once, 2 = rebuilt in fail-safe mode, 3 = provider
-    // switch attempted. Resets to 0 after 20s of clean playback.
+    // 0 = clean, 1 = full rebuild (fresh codecs, same quality), 2 = rebuild
+    // capped 1080 (survives a 4K decoder that dies at runtime), 3 = fail-safe
+    // rebuild at 720, 4 = provider switches, then terminal. Resets after 20s
+    // of clean playback.
     @Volatile private var recoveryStage = 0
     @Volatile private var cleanSinceMs = 0L
     @Volatile private var preAttachTried = false
+
+    /** Providers that hard-failed during THIS playback session. */
+    private val failedProviders = mutableSetOf<ProviderId>()
+
+    /**
+     * Codec-class error detection: RUNTIME_CHECK (1004 — raw
+     * IllegalStateException/IllegalArgumentException on the playback thread) is
+     * almost always a vendor decoder dying on the selected rendition, together
+     * with the decoder-error family. These NEVER recover via prepare() — the
+     * codec instance is poisoned; they need a full player rebuild.
+     */
+    private fun isCodecClassError(error: PlaybackException): Boolean = when (error.errorCode) {
+        PlaybackException.ERROR_CODE_FAILED_RUNTIME_CHECK,
+        PlaybackException.ERROR_CODE_DECODER_INIT_FAILED,
+        PlaybackException.ERROR_CODE_DECODER_QUERY_FAILED,
+        PlaybackException.ERROR_CODE_DECODING_FAILED,
+        PlaybackException.ERROR_CODE_DECODING_FORMAT_EXCEEDS_CAPABILITIES,
+        PlaybackException.ERROR_CODE_AUDIO_TRACK_INIT_FAILED,
+        -> true
+        else -> false
+    }
+
+    /**
+     * Ceiling for quality selection that survives THIS app session. Set when
+     * the device's codecs hard-fail on high renditions (lying vendor decoders):
+     * 4K stays enabled on every capable device and every new session; a box
+     * that crashed at 4K gets instant stable playback instead of a crash loop.
+     */
+    @Volatile private var sessionDecoderCap: Int? = null
+
+    /** Human words for the terminal error, with the real cause visible. */
+    private fun friendlyError(error: PlaybackException): String = when (error.errorCode) {
+        PlaybackException.ERROR_CODE_FAILED_RUNTIME_CHECK,
+        PlaybackException.ERROR_CODE_DECODER_INIT_FAILED,
+        PlaybackException.ERROR_CODE_DECODING_FORMAT_EXCEEDS_CAPABILITIES,
+        PlaybackException.ERROR_CODE_DECODING_FORMAT_UNSUPPORTED,
+        -> "This TV's decoder couldn't handle that stream — try another source"
+        PlaybackException.ERROR_CODE_DECODING_FAILED,
+        PlaybackException.ERROR_CODE_DECODER_QUERY_FAILED,
+        -> "Decoder failed mid-playback — retry to continue"
+        PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_FAILED,
+        -> "Network problem — check the connection and retry"
+        PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_TIMEOUT,
+        -> "Source timed out — try another source"
+        PlaybackException.ERROR_CODE_IO_BAD_HTTP_STATUS,
+        -> "Source refused the request (link expired) — retry"
+        PlaybackException.ERROR_CODE_IO_FILE_NOT_FOUND,
+        -> "Source no longer serves that file — try another source"
+        PlaybackException.ERROR_CODE_PARSING_MANIFEST_MALFORMED,
+        -> "Source sent a broken playlist — try another source"
+        PlaybackException.ERROR_CODE_BEHIND_LIVE_WINDOW,
+        -> "Stream slipped behind live — retry"
+        else -> "Playback error: ${error.errorCodeName}"
+    }
 
     private val _currentRequest = MutableStateFlow(request)
     val activeRequest: StateFlow<PlaybackRequest> get() = _currentRequest.asStateFlow()
@@ -205,6 +262,7 @@ class PlayerViewModel(
             logPlaybackError(error)
             val played = _positionMs.value
             val stream = currentStream
+            val codecClass = isCodecClassError(error)
 
             // Long sessions: the CDN token (the ?s=... in the m3u8 URL) expires
             // after ~1h — re-resolve the stream at the current position.
@@ -216,31 +274,55 @@ class PlayerViewModel(
                 return
             }
 
-            // Early failures: escalate the self-healing ladder so playback
-            // ALWAYS comes back instead of dead-stopping (each step re-arms;
-            // 20s of clean playback resets to stage 0).
-            when (recoveryStage) {
-                0 -> {
+            // Self-healing ladder. Every step re-arms; 20s of clean playback
+            // resets to stage 0. Codec-class errors skip the soft step — a
+            // poisoned codec instance never recovers from prepare(), so the
+            // player is rebuilt with FRESH codec instances immediately.
+            when {
+                !codecClass && recoveryStage == 0 -> {
                     recoveryStage = 1
                     _message.value = "Playback hiccup — reconnecting…"
                     AppLog.d("Recovery", "stage 1: re-preparing at position")
                     reprepareAtPosition()
                 }
 
-                1 -> {
+                codecClass && sessionDecoderCap == null && recoveryStage <= 1 -> {
+                    // first codec crash at full quality: fresh player, same quality
                     recoveryStage = 2
+                    _message.value = "Decoder hiccup — rebuilding player…"
+                    AppLog.d("Recovery", "codec error ${error.errorCodeName}: full rebuild, fresh codecs")
+                    rebuildAtPosition(capHeight = null, safeMode = false)
+                }
+
+                recoveryStage <= 2 -> {
+                    // 4K step-down: the box's decoder can't hold the top rendition
+                    recoveryStage = 3
+                    sessionDecoderCap = 1080
+                    _message.value =
+                        if (codecClass) "4K decoder crashed on this TV — continuing at 1080p"
+                        else "Rebuilding player (quality stepped down)…"
+                    AppLog.d("Recovery", "step-down rebuild, cap 1080p")
+                    rebuildAtPosition(capHeight = 1080, safeMode = false)
+                }
+
+                recoveryStage <= 3 -> {
+                    // fail-safe pipeline: no cache, no prefetch, plain network
+                    recoveryStage = 4
+                    sessionDecoderCap = 720
                     _message.value = "Rebuilding player (fail-safe mode)…"
-                    AppLog.d("Recovery", "stage 2: rebuilding without cache/prefetch")
-                    rebuildInSafeMode()
+                    AppLog.d("Recovery", "safe-mode rebuild, cap 720p")
+                    rebuildAtPosition(capHeight = 720, safeMode = true)
                 }
 
                 else -> {
-                    recoveryStage = 3
-                    if (settings.providerOrder.size >= 2 && stream != null && !switchingSource) {
-                        _message.value = "Trying another source…"
-                        autoSwitchProvider()
+                    recoveryStage = 5
+                    stream?.let { failedProviders.add(it.provider) }
+                    val remaining = settings.providerOrder.filter { it !in failedProviders }
+                    if (remaining.isNotEmpty() && !switchingSource) {
+                        _message.value = "This source keeps failing — trying ${remaining.first().label}…"
+                        autoSwitchProvider(remaining.first())
                     } else {
-                        _message.value = "Playback error: ${error.errorCodeName}"
+                        _message.value = friendlyError(error)
                     }
                 }
             }
@@ -338,17 +420,20 @@ class PlayerViewModel(
         val embedded = _embeddedTextTracks.value
         if (embedded.isEmpty()) return
         if (!settings.subtitlesEnabled) return
-        if (activeSubtitle != null || _activeSubLabel.value != null) return
-        embeddedAutoTried = true
         val pref = settings.preferredSubtitleLang.lowercase()
         val pick = embedded.firstOrNull { it.language?.lowercase()?.startsWith(pref) == true }
             ?: embedded.firstOrNull {
                 it.language?.lowercase() == "en" || it.label.contains("english", true)
-            }
-        if (pick != null) {
-            if (pick.isSelected) _activeSubLabel.value = pick.label
-            else selectEmbeddedSub(pick.groupIndex, pick.trackIndex)
-        }
+            } ?: return
+        embeddedAutoTried = true
+        // The stream's OWN subtitle track always wins over a sidecar file that
+        // was pre-attached before we knew the manifest carried subtitles —
+        // same policy as the sites' own players (vidfast/vidcore render their
+        // manifest/harvested tracks natively).
+        activeSubtitle = null
+        if (!pick.isSelected) selectEmbeddedSub(pick.groupIndex, pick.trackIndex)
+        _activeSubLabel.value = pick.label
+        AppLog.d("Subs", "auto-selected the stream's embedded subtitle: ${pick.label}")
     }
 
     init {
@@ -460,6 +545,46 @@ class PlayerViewModel(
         _subs.value = merged
     }
 
+    /**
+     * Reads the stream's own master playlist and pre-selects the highest
+     * rendition this TV can honestly decode. Two outcomes:
+     *  - the box's codec list supports the top variant (2160p): full quality,
+     *    4K stays the goal;
+     *  - it doesn't: quality ceiling is pre-lowered to the best decodable
+     *    height BEFORE the first prepare, so playback never even attempts the
+     *    rendition that would crash (the crash-then-step-down ladder in
+     *    onPlayerError still covers lying vendor codecs behind this).
+     */
+    private suspend fun probeLadder(stream: ResolvedStream) {
+        if (stream.kind != "m3u8-master" && stream.kind != "m3u8") return
+        val text = kotlinx.coroutines.withTimeoutOrNull(6_000) {
+            kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                runCatching { Net.get(stream.url, headers = stream.headers) }.getOrNull()
+            }
+        } ?: return
+        val ladder = PlayerEngine.parseLadder(text)
+        if (ladder.isEmpty()) return
+        val top = ladder.first()
+        AppLog.d(
+            "Ladder",
+            "site ladder: " + ladder.take(6).joinToString { PlayerEngine.describeVariant(it) },
+        )
+        if (top.height < 2000) return // no 4K variant to worry about
+
+        val decodable = PlayerEngine.maxDecodableHeight(ladder)
+        if (decodable == null || decodable < top.height) {
+            val cap = decodable?.coerceIn(360, 1080) ?: 720
+            sessionDecoderCap = minOf(cap, sessionDecoderCap ?: cap)
+            AppLog.d(
+                "Ladder",
+                "TV decoders top out at ${decodable ?: "unknown"}p — starting capped at ${sessionDecoderCap}p (ladder top ${top.height}p)",
+            )
+            _message.value = "4K available — this TV's decoders support up to ${decodable ?: "?"}p"
+        } else {
+            AppLog.d("Ladder", "4K ${top.height}p decodable (${top.codecs ?: "?"}) — full quality enabled")
+        }
+    }
+
     private fun startResolve(
         req: PlaybackRequest,
         reusePlayer: Boolean,
@@ -487,6 +612,17 @@ class PlayerViewModel(
             providerSubs = stream.subs
             if (providerSubs.isNotEmpty()) mergeSubs(emptyList())
 
+            // fresh stream re-arms the recovery ladder (but NOT the session
+            // decoder cap — a box that crashed at 4K must not crash again)
+            failedProviders.clear()
+            recoveryStage = 0
+
+            // One quick look at the site's own ladder before building the
+            // player: what the top variant is and whether this TV's codecs
+            // honestly support it. Prevents the guaranteed 4K crash on boxes
+            // whose codec list itself already says no.
+            probeLadder(stream)
+
             // ship the preferred subtitle with the FIRST media item (no
             // mid-playback restart later)
             if (activeSubtitle == null) {
@@ -511,8 +647,7 @@ class PlayerViewModel(
                     built.player
                 }
 
-            PlayerEngine.applyQualityMode(p, _qualityMode.value)
-
+            PlayerEngine.applyQualityMode(p, _qualityMode.value, sessionDecoderCap)
             autoReResolved = false
             bufferingSinceMs = 0
             stallStage = 0
@@ -542,11 +677,16 @@ class PlayerViewModel(
     }
 
     /**
-     * Recovery stage 2: rebuild the player in fail-safe mode — no disk cache,
-     * no prefetch, direct network pipeline. Whatever was wrong with the
-     * cache layer is bypassed entirely; playback continues at the same position.
+     * Recovery: FULL rebuild — release everything (a poisoned codec instance
+     * never recovers via prepare()), build a fresh player and continue at the
+     * same position.
+     *
+     * @param capHeight decoder-safety ceiling for the rebuild (null = keep
+     * whatever quality is currently allowed)
+     * @param safeMode fail-safe pipeline: no disk cache, no prefetch, direct
+     * network — for repeated failures
      */
-    private fun rebuildInSafeMode() {
+    private fun rebuildAtPosition(capHeight: Int?, safeMode: Boolean) {
         val stream = currentStream ?: return
         val pos = _positionMs.value
         prefetcher?.stop()
@@ -564,14 +704,16 @@ class PlayerViewModel(
             context = context,
             settings = settings,
             streamHeaders = stream.headers,
-            prefetchEnabled = { false },
-            safeMode = true,
+            prefetchEnabled = { settings.turboPrefetch },
+            bufferAheadMs = { (_bufferedMs.value - _positionMs.value).coerceAtLeast(0) },
+            positionMs = { _positionMs.value },
+            safeMode = safeMode,
         )
         built.player.addListener(playerListener)
         built.player.addAnalyticsListener(analyticsListener)
         _player.value = built.player
         prefetcher = built.prefetcher
-        PlayerEngine.applyQualityMode(built.player, _qualityMode.value)
+        PlayerEngine.applyQualityMode(built.player, _qualityMode.value, sessionDecoderCap ?: capHeight)
 
         val mediaItem = PlayerEngine.buildMediaItem(stream.url, stream.kind, null, activeSubtitle)
         built.player.setMediaItem(mediaItem, pos)
@@ -631,18 +773,20 @@ class PlayerViewModel(
         }
     }
 
-    private fun autoSwitchProvider() {
+    private fun autoSwitchProvider(next: ProviderId? = null) {
         if (switchingSource) return
         val stream = currentStream ?: return
         val order = settings.providerOrder
         if (order.size < 2) return
-        val idx = order.indexOf(stream.provider)
-        val next = order[(idx + 1) % order.size]
+        val target = next ?: run {
+            val idx = order.indexOf(stream.provider)
+            order[(idx + 1) % order.size]
+        }
         switchingSource = true
-        AppLog.d("Watchdog", "stalling on ${stream.provider.label} — switching to ${next.label}")
-        _message.value = "This source is stalling — switching to ${next.label}…"
+        AppLog.d("Watchdog", "stalling on ${stream.provider.label} — switching to ${target.label}")
+        _message.value = "This source is stalling — switching to ${target.label}…"
         val pos = _positionMs.value
-        startResolve(currentRequest.copy(startAtMs = pos), reusePlayer = true, forceOrder = listOf(next))
+        startResolve(currentRequest.copy(startAtMs = pos), reusePlayer = true, forceOrder = listOf(target))
     }
 
     // ---- progress ----------------------------------------------------------
@@ -729,7 +873,7 @@ class PlayerViewModel(
     fun setQuality(mode: QualityMode) {
         _qualityMode.value = mode
         val p = player.value ?: return
-        PlayerEngine.applyQualityMode(p, mode)
+        PlayerEngine.applyQualityMode(p, mode, sessionDecoderCap)
         // ABR stays fully adaptive in every mode; only the ceiling changes.
         p.trackSelectionParameters = p.trackSelectionParameters.buildUpon()
             .clearOverridesOfType(C.TRACK_TYPE_VIDEO).build()
@@ -828,6 +972,7 @@ class PlayerViewModel(
         autoReResolved = false
         recoveryStage = 0
         cleanSinceMs = 0
+        failedProviders.clear()
         viewModelScope.launch {
             settings = SettingsStore.read(context)
             // keep the watched position when switching sources manually

@@ -19,12 +19,15 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.ArrowDownward
 import androidx.compose.material.icons.filled.ArrowUpward
 import androidx.compose.material.icons.filled.BugReport
+import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.PlaylistPlay
+import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.Storage
 import androidx.compose.material.icons.filled.Subtitles
 import androidx.compose.material.icons.filled.Tune
@@ -38,13 +41,18 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -388,7 +396,26 @@ private fun ToggleRow(label: String, checked: Boolean, onCheckedChange: (Boolean
 
 @Composable
 fun LogsScreen(onBack: () -> Unit) {
+    // live snapshot: logs change only while actions happen, so a remember
+    // keyed on a manual refresh keeps it stable while text is selected
     val logs = com.loltube.app.util.AppLog.lines
+    val clipboard = LocalClipboardManager.current
+    val context = LocalContext.current
+    var copiedTick by remember { mutableStateOf(0) }
+
+    fun shareLogs() {
+        runCatching {
+            val text = com.loltube.app.util.AppLog.lines.joinToString("\n")
+            val intent = android.content.Intent(android.content.Intent.ACTION_SEND).apply {
+                type = "text/plain"
+                putExtra(android.content.Intent.EXTRA_TEXT, text)
+                putExtra(android.content.Intent.EXTRA_TITLE, "LoLTube logs")
+                addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+            context.startActivity(android.content.Intent.createChooser(intent, "Share logs"))
+        }
+    }
+
     Column(
         Modifier
             .fillMaxSize()
@@ -396,17 +423,44 @@ fun LogsScreen(onBack: () -> Unit) {
     ) {
         Row(
             verticalAlignment = Alignment.CenterVertically,
-            modifier = Modifier.padding(top = 12.dp, start = 4.dp),
+            modifier = Modifier.padding(top = 12.dp, start = 4.dp, end = 8.dp),
         ) {
             IconButton(onClick = onBack) {
                 Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back")
             }
-            Text("Logs", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.ExtraBold)
+            Column {
+                Text("Logs", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.ExtraBold)
+                Text(
+                    if (copiedTick > 0) "Copied ${logs.size} lines to clipboard" else "${logs.size} lines",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = if (copiedTick > 0) MaterialTheme.colorScheme.primary
+                    else MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
             Spacer(Modifier.weight(1f))
             OutlinedButton(
-                onClick = { com.loltube.app.util.AppLog.clear() },
-                modifier = Modifier.padding(end = 12.dp),
-            ) { Text("Clear") }
+                onClick = {
+                    clipboard.setText(AnnotatedString(com.loltube.app.util.AppLog.lines.joinToString("\n")))
+                    copiedTick += 1
+                },
+                modifier = Modifier.padding(end = 6.dp),
+            ) {
+                Icon(Icons.Filled.ContentCopy, null, Modifier.size(16.dp))
+                Spacer(Modifier.width(6.dp))
+                Text("Copy")
+            }
+            OutlinedButton(
+                onClick = { shareLogs() },
+                modifier = Modifier.padding(end = 6.dp),
+            ) {
+                Icon(Icons.Filled.Share, null, Modifier.size(16.dp))
+                Spacer(Modifier.width(6.dp))
+                Text("Share")
+            }
+            OutlinedButton(onClick = {
+                com.loltube.app.util.AppLog.clear()
+                copiedTick = 0
+            }) { Text("Clear") }
         }
         Surface(
             color = MaterialTheme.colorScheme.surface,
@@ -416,19 +470,23 @@ fun LogsScreen(onBack: () -> Unit) {
                 .padding(12.dp)
                 .weight(1f),
         ) {
-            LazyColumn(
-                Modifier
-                    .fillMaxSize()
-                    .padding(10.dp),
-                verticalArrangement = Arrangement.spacedBy(2.dp),
-            ) {
-                items(logs.size) { i ->
-                    Text(
-                        logs[i],
-                        fontSize = 11.sp,
-                        color = Color(0xFF9CCC9C),
-                        fontFamily = FontFamily.Monospace,
-                    )
+            // selectable text: individual lines can be highlighted + copied
+            // with the system clipboard too (D-pad OK, then copy affordance)
+            SelectionContainer {
+                LazyColumn(
+                    Modifier
+                        .fillMaxSize()
+                        .padding(10.dp),
+                    verticalArrangement = Arrangement.spacedBy(2.dp),
+                ) {
+                    items(logs.size) { i ->
+                        Text(
+                            logs[i],
+                            fontSize = 11.sp,
+                            color = Color(0xFF9CCC9C),
+                            fontFamily = FontFamily.Monospace,
+                        )
+                    }
                 }
             }
         }

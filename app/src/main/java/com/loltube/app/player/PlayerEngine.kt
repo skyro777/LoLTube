@@ -33,8 +33,11 @@ import com.loltube.app.util.AppLog
  *    which converts any runtime-exception race (cache/OkHttp/prefetch
  *    collisions — the source of ERROR_CODE_FAILED_RUNTIME_CHECK) into a
  *    retriable network error instead of a fatal one;
- *  - hardware-decoder-only selection for video (audio decoders are usually
- *    software, filtering them out kills the audio renderer);
+ *  - a crash-proof renderer layer ([SafeRenderers]): the codec-surface switch
+ *    bug on vendor TV-box decoders (media3 #1641/#2529/#3011) and any codec
+ *    query failure are survived instead of killing the stream with
+ *    ERROR_CODE_FAILED_RUNTIME_CHECK; software decoders stay available as
+ *    real fallback (the old hardware-only filter removed them);
  *  - OkHttp transport with keep-alive pooling and 16 requests per host so the
  *    player + 4 prefetch workers can fetch segments concurrently.
  */
@@ -95,21 +98,12 @@ object PlayerEngine {
         )
         val trackSelector = DefaultTrackSelector(context, adaptiveFactory)
 
-        // Hardware decoders only — but ONLY for video: audio decoders are almost always
-        // software ("OMX.google.*") and filtering them out leaves no audio renderer at
-        // all, which produced silent playback on most devices.
-        val hwCodecSelector = MediaCodecSelector { mimeType, requiresSecure, requiresTunneling ->
-            val infos = MediaCodecSelector.DEFAULT.getDecoderInfos(mimeType, requiresSecure, requiresTunneling)
-            if (mimeType.startsWith("video/")) {
-                val hw = infos.filter { it.hardwareAccelerated }
-                if (hw.isEmpty()) infos else hw // fall back rather than lose video entirely
-            } else {
-                infos
-            }
-        }
-
-        val renderersFactory = DefaultRenderersFactory(context)
-            .setMediaCodecSelector(hwCodecSelector)
+        // Stock pipeline with the safe video renderer patched in — see
+        // [SafeRenderers]. Software decoders (c2.android.*) are kept as genuine
+        // fallback: the old hardware-only filter is what left some boxes with
+        // no usable decoder at all.
+        val renderersFactory = SafeRenderers.factory(context)
+            .setMediaCodecSelector(SAFE_CODEC_SELECTOR)
             .setEnableDecoderFallback(true)
             .setExtensionRendererMode(DefaultRenderersFactory.EXTENSION_RENDERER_MODE_OFF)
 
@@ -212,22 +206,28 @@ object PlayerEngine {
      * bitrate" flag disabled ABR entirely and guaranteed rebuffering); the
      * difference is only how high the selection is allowed to climb. Capped
      * modes also rewrite the master playlist via [CapPolicy].
+     *
+     * [maxHeightOverride] is the decoder-safety ceiling computed by
+     * [probeLadder] / the recovery ladder: 4K is attempted whenever the
+     * device's codecs honestly report support; a box whose vendor decoder
+     * chokes on 2160p gets playback instead of a crash.
      */
-    fun applyQualityMode(player: ExoPlayer, mode: QualityMode) {
-        val params = player.trackSelectionParameters.buildUpon()
-        when (mode) {
-            QualityMode.AUTO -> params.setMaxVideoSize(3840, 2160)
-            QualityMode.MAX -> params.setMaxVideoSize(3840, 2160)
-            QualityMode.CAP_1080 -> params.setMaxVideoSize(1920, 1088)
-            QualityMode.CAP_720 -> params.setMaxVideoSize(1280, 736)
-        }
-        player.trackSelectionParameters = params.build()
-        CapPolicy.maxVideoHeight = when (mode) {
+    fun applyQualityMode(player: ExoPlayer, mode: QualityMode, maxHeightOverride: Int? = null) {
+        val ceiling = when (mode) {
             QualityMode.AUTO, QualityMode.MAX -> 2160
             QualityMode.CAP_1080 -> 1088
             QualityMode.CAP_720 -> 736
         }
-        AppLog.d("Player", "quality mode -> $mode (manifest cap ${CapPolicy.maxVideoHeight}p)")
+        val effective = maxHeightOverride?.let { minOf(it, ceiling) } ?: ceiling
+        val params = player.trackSelectionParameters.buildUpon()
+        when (mode) {
+            QualityMode.AUTO, QualityMode.MAX -> params.setMaxVideoSize(3840, effective)
+            QualityMode.CAP_1080 -> params.setMaxVideoSize(1920, effective)
+            QualityMode.CAP_720 -> params.setMaxVideoSize(1280, effective)
+        }
+        player.trackSelectionParameters = params.build()
+        CapPolicy.maxVideoHeight = effective
+        AppLog.d("Player", "quality mode -> $mode (ceiling ${ceiling}p -> effective ${effective}p)")
     }
 
     /** True if a 4K hardware decoder exists for HEVC/AVC at 3840x2160@30. */
@@ -241,6 +241,106 @@ object PlayerEngine {
     } catch (t: Throwable) {
         AppLog.e("Player", "codec probe failed: ${t.message}")
         false
+    }
+
+    // ---- variant ladder (parsed from the harvested master playlist) ---------
+
+    /** One #EXT-X-STREAM-INF variant, as the site's CDN serves it. */
+    data class Variant(
+        val height: Int,
+        val width: Int,
+        val bandwidth: Long,
+        val codecs: String?,
+        val uri: String,
+    )
+
+    /** Parses `#EXT-X-STREAM-INF` variants out of a master playlist. */
+    fun parseLadder(masterText: String): List<Variant> {
+        val out = mutableListOf<Variant>()
+        val lines = masterText.lines()
+        var i = 0
+        while (i < lines.size) {
+            val line = lines[i].trim()
+            if (line.startsWith("#EXT-X-STREAM-INF:")) {
+                val res = Regex("""RESOLUTION=(\d+)x(\d+)""").find(line)?.groupValues
+                val bw = Regex("""BANDWIDTH=(\d+)""").find(line)?.groupValues?.get(1)?.toLongOrNull()
+                val codecs = Regex("""CODECS="?([^",]+)"?""").find(line)?.groupValues?.get(1)
+                var j = i + 1
+                var uri: String? = null
+                while (j < lines.size) {
+                    val l2 = lines[j].trim()
+                    if (l2.isNotEmpty() && !l2.startsWith("#")) {
+                        uri = l2
+                        break
+                    }
+                    j++
+                }
+                if (uri != null && res != null) {
+                    out.add(
+                        Variant(
+                            height = res[2].toIntOrNull() ?: 0,
+                            width = res[1].toIntOrNull() ?: 0,
+                            bandwidth = bw ?: 0,
+                            codecs = codecs,
+                            uri = uri,
+                        )
+                    )
+                }
+                i = j
+            } else {
+                i++
+            }
+        }
+        return out.sortedByDescending { it.height }
+    }
+
+    /**
+     * Highest variant height the device can honestly decode:
+     *  - 4K (>1088p) requires a HARDWARE decoder advertising the exact size —
+     *    software 4K cannot keep up on TV-box CPUs;
+     *  - <=1080p accepts hardware or software.
+     * Lying vendor codecs (claim 4K, die at runtime) still fall through to the
+     * recovery ladder's step-down; this probe only prevents the guaranteed
+     * crashes the codec list itself already knows about.
+     */
+    fun maxDecodableHeight(ladder: List<Variant>): Int? {
+        if (ladder.isEmpty()) return null
+        var best = 0
+        for (v in ladder) {
+            if (v.height <= 0) continue
+            val mime = mimeFor(v) ?: continue
+            val decodable = try {
+                MediaCodecSelector.DEFAULT.getDecoderInfos(mime, false, false).any { info ->
+                    val ok = if (v.height > 1088) info.hardwareAccelerated else true
+                    ok && run {
+                        val caps = info.capabilities?.videoCapabilities
+                        caps != null && caps.isSizeSupported(v.width, v.height)
+                    }
+                }
+            } catch (t: Throwable) {
+                false
+            }
+            if (decodable && v.height > best) best = v.height
+        }
+        return if (best > 0) best else null
+    }
+
+    /** video/... MIME for a variant's CODECS= attribute (avc/hevc aware). */
+    private fun mimeFor(v: Variant): String? {
+        val c = v.codecs?.lowercase() ?: return null
+        return when {
+            c.contains("hvc") || c.contains("hevc") -> MimeTypes.VIDEO_H265
+            c.contains("avc") || c.contains("h264") -> MimeTypes.VIDEO_H264
+            c.contains("av01") || c.contains("av1") -> "video/av01"
+            c.contains("vp9") || c.contains("vp09") -> MimeTypes.VIDEO_VP9
+            else -> MimeTypes.VIDEO_H264 // CDN ladders are H.264/HEVC in practice
+        }
+    }
+
+    /** Human label for logging: "2160p avc1.640033 @ 16.2 Mbps". */
+    fun describeVariant(v: Variant): String {
+        val mbps = if (v.bandwidth > 0) " @ %.1f Mbps".format(v.bandwidth / 1_000_000f) else ""
+        return "${v.height}p ${v.codecs ?: "?codec"}$mbps"
     }
 
     fun buildMediaItem(

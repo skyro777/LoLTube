@@ -13,7 +13,17 @@ Grab the APK from the [**Latest Build** release](../../releases/tag/latest):
 
 Every push to `main` rebuilds it automatically (GitHub Actions).
 
-## What's new in v0.4.0
+## What's new in v0.5.0
+
+- **Fixed the v0.4 playback crash for real** (`ERROR_CODE_FAILED_RUNTIME_CHECK`). Media3's own source + issue tracker pin this code (1004) to a raw IllegalStateException/IllegalArgumentException on the playback thread — on Android 9 TV boxes that is almost always the vendor video decoder dying when the 2160p rendition is selected or when the output surface switches. Three defenses now ship:
+  - **Crash-safe renderer layer** (`SafeRenderers`): the codec-surface switch bug (media3 #1641 FireStick / #2529 SberBox / #3011 — `MediaCodec.setOutputSurface` throwing IllegalArgumentException) is patched at the renderer level; the codec-selector can never throw on the playback thread; and the hardware-only decoder filter is gone, so software `c2.android.*` decoders work as genuine fallback.
+  - **Honest 4K pre-selection**: before the first prepare the app reads the stream's own master playlist (the ladder the site serves: 2160p/1080p/720p/480p with codecs) and checks the TV's decoders against each variant. 4K stays enabled whenever the codecs honestly support it; on boxes that can't, the ceiling is pre-lowered to the best decodable height so playback never even attempts the rendition that would crash.
+  - **Codec-aware self-healing ladder**: codec-class errors no longer get the soft re-prepare (a poisoned codec instance never recovers that way) — they get an immediate full player rebuild with fresh codecs, then a 4K→1080p step-down rebuild, then a fail-safe 720p rebuild, then a source switch, then a friendly English error message with Retry. 4K is still attempted first on every new session on every device.
+- **Copyable diagnostics** — the in-app log viewer now has **Copy**, **Share** and selectable text (Settings → Diagnostics → Logs). The log lines carry the full exception chain + stack frames of any playback error, so a pasted log pinpoints the exact cause.
+- **Site-native subtitles first** — the stream's own manifest subtitle renditions (the ones the site's player itself shows) are now auto-selected with priority over any pre-attached sidecar file; the page-harvested track listing (captured from the provider's own player, immune to API changes) is the second layer; the subtitle endpoint only fills in when a provider offers nothing.
+- **Source-failure tracking** — a source that hard-fails is remembered for the rest of the playback attempt; the ladder moves through the remaining sources and finally shows a clear reason instead of cycling.
+
+## What was new in v0.4.0
 
 - **Fixed the v0.3 playback crash** (`ERROR_CODE_FAILED_RUNTIME_CHECK`). Root cause: the auto-subtitle attach restarted the media item ~4 s into playback, cancelling in-flight segment loads — that race inside OkHttp/CacheDataSource threw a runtime exception which Media3 treats as fatal. Subtitles now ship **with the first media item before playback starts** (no restart at all), and the whole data pipeline runs through a new crash-proof `SafeDataSource` that converts any runtime-exception race into a **retriable** error instead of a fatal one.
 - **Self-healing player** — if playback still ever errors, the recovery ladder kicks in automatically: re-prepare at position → rebuild in fail-safe mode (direct network, no cache) → switch source. 20 s of clean playback re-arms it. You should never see a dead player screen again.
