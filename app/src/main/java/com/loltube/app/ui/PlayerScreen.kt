@@ -51,6 +51,7 @@ import androidx.compose.material.icons.filled.PlaylistPlay
 import androidx.compose.material.icons.filled.QueryStats
 import androidx.compose.material.icons.filled.Subtitles
 import androidx.compose.material.icons.filled.SwapHoriz
+import androidx.compose.material.icons.filled.Timer
 import androidx.compose.material.icons.filled.VolumeOff
 import androidx.compose.material.icons.filled.VolumeUp
 import androidx.compose.material3.Button
@@ -158,6 +159,9 @@ fun PlayerScreen(
     val pendingNext by vm.pendingNext.collectAsState()
     val details by vm.details.collectAsState()
     val activeReq by vm.activeRequest.collectAsState()
+    val cueText by vm.cueText.collectAsState()
+    val subDelayMs by vm.subDelayMs.collectAsState()
+    val subStyle by vm.subStyle.collectAsState()
 
     var controlsVisible by remember { mutableStateOf(true) }
     var statsVisible by remember { mutableStateOf(false) }
@@ -237,7 +241,11 @@ fun PlayerScreen(
         view.viewTreeObserver.addOnWindowFocusChangeListener(focusListener)
 
         val lifecycleObserver = LifecycleEventObserver { _, event ->
-            if (event == Lifecycle.Event.ON_RESUME) applyImmersive()
+            if (event == Lifecycle.Event.ON_RESUME) {
+                applyImmersive()
+                // subtitle appearance / sync may have been edited in Settings
+                vm.refreshSubStyle()
+            }
         }
         lifecycleOwner.lifecycle.addObserver(lifecycleObserver)
 
@@ -550,6 +558,18 @@ fun PlayerScreen(
                     applyAspectTransform(pv, aspectMode, videoSize, screenAspect)
                 },
                 modifier = Modifier.fillMaxSize(),
+            )
+        }
+
+        // ---------------- subtitle overlay (site-style, app-rendered) ---------
+        // Parsed sidecar cues with OUR timing offset + styling — the same
+        // architecture vidfast/vidcore/mapple use (custom overlay, video
+        // untouched). Embedded manifest tracks (rare) keep using PlayerView.
+        if (cueText != null) {
+            SubtitleOverlay(
+                text = cueText ?: "",
+                style = subStyle,
+                bottomPad = if (controlsVisible) 92.dp else 40.dp,
             )
         }
 
@@ -967,6 +987,42 @@ fun PlayerScreen(
                         }
                     }
 
+                    // subtitle SYNC (per-source, instant nudge — fixes the
+                    // 2–6s ahead/behind drift each source's copy has)
+                    if (activeSubLabel != null) {
+                        Box {
+                            MenuButton(
+                                icon = { Icon(Icons.Filled.Timer, null, tint = Color.White) },
+                                label = syncShort(subDelayMs),
+                                open = openMenu == "subsync",
+                                onClick = { openMenu = if (openMenu == "subsync") null else "subsync" },
+                            )
+                            DropdownMenu(expanded = openMenu == "subsync", onDismissRequest = { openMenu = null }) {
+                                DropdownMenuItem(
+                                    text = { Text("Subtitles early → make them later (+)\nSubtitles late → make them earlier (−)", style = MaterialTheme.typography.labelSmall) },
+                                    onClick = {},
+                                    enabled = false,
+                                )
+                                listOf(-1000, -500, -250).forEach { d ->
+                                    DropdownMenuItem(
+                                        text = { Text("− ${absSec(d)}s  (earlier)") },
+                                        onClick = { vm.nudgeSubDelay(d); openMenu = null },
+                                    )
+                                }
+                                DropdownMenuItem(
+                                    text = { Text("Reset — 0s") },
+                                    onClick = { vm.resetSubDelay(); openMenu = null },
+                                )
+                                listOf(250, 500, 1000).forEach { d ->
+                                    DropdownMenuItem(
+                                        text = { Text("+ ${absSec(d)}s  (later)") },
+                                        onClick = { vm.nudgeSubDelay(d); openMenu = null },
+                                    )
+                                }
+                            }
+                        }
+                    }
+
                     // episodes (jump between episodes of the current show)
                     val seriesDetails = details
                     if (seriesDetails != null && seriesDetails.type == "series" && seriesDetails.episodes.isNotEmpty()) {
@@ -1132,6 +1188,71 @@ private fun aspectShort(m: AspectMode): String = when (m) {
     AspectMode.FIT -> "Fit"
     AspectMode.FILL -> "Stretch"
     AspectMode.ZOOM -> "Zoom"
+}
+
+/** "Sync +2.5s" / "Sync 0s" — the label on the CC-sync button. */
+private fun syncShort(delayMs: Int): String {
+    val s = delayMs / 1000f
+    val sign = if (delayMs > 0) "+" else if (delayMs < 0) "−" else ""
+    return "Sync ${sign}${"%.1f".format(kotlin.math.abs(s))}s"
+}
+
+private fun absSec(ms: Int): String = "%.2f".format(kotlin.math.abs(ms / 1000f)).trimEnd('0').trimEnd('.').ifEmpty { "0" }
+
+/**
+ * The app-rendered subtitle overlay (vidfast/vidcore/mapple architecture:
+ * the sites all render cues with their own overlay, leaving the video
+ * untouched — that's what makes instant sync nudges and full styling
+ * possible). Default size is noticeably smaller than the built-in
+ * SubtitleView renderer (base ≈ 4.2% of screen height vs ~5.3%).
+ */
+@Composable
+private fun SubtitleOverlay(
+    text: String,
+    style: PlayerViewModel.SubStyle,
+    bottomPad: androidx.compose.ui.unit.Dp,
+) {
+    BoxWithConstraints(
+        Modifier
+            .fillMaxSize()
+            .padding(bottom = bottomPad),
+        contentAlignment = Alignment.BottomCenter,
+    ) {
+        // ~4.2% of screen height at 100% size — the sites' visual weight class
+        val fontSp = (maxHeight.value * 0.042f * (style.sizePct / 100f))
+            .coerceIn(11f, 42f)
+            .sp
+        val textColor = when (style.color) {
+            com.loltube.app.data.SubColor.WHITE -> Color.White
+            com.loltube.app.data.SubColor.YELLOW -> Color(0xFFFFE14D)
+            com.loltube.app.data.SubColor.CYAN -> Color(0xFF4DE5FF)
+            com.loltube.app.data.SubColor.SILVER -> Color(0xFFC9CDD4)
+        }
+        val bgAlpha = (style.bgPct / 100f) * 0.78f
+        Text(
+            text = text,
+            color = textColor,
+            fontSize = fontSp,
+            lineHeight = fontSp * 1.18f,
+            fontWeight = FontWeight.SemiBold,
+            textAlign = TextAlign.Center,
+            maxLines = 3,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier
+                .fillMaxWidth(fraction = 0.78f)
+                .then(
+                    if (bgAlpha > 0.02f) {
+                        Modifier.background(
+                            Color.Black.copy(alpha = bgAlpha),
+                            RoundedCornerShape(6.dp),
+                        )
+                    } else {
+                        Modifier
+                    }
+                )
+                .padding(horizontal = 12.dp, vertical = 4.dp),
+        )
+    }
 }
 
 private fun qualityShort(m: QualityMode): String = when (m) {

@@ -30,6 +30,7 @@ import androidx.compose.material.icons.filled.PlaylistPlay
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.Storage
 import androidx.compose.material.icons.filled.Subtitles
+import androidx.compose.material.icons.filled.Timer
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -60,8 +61,11 @@ import androidx.compose.ui.unit.sp
 import com.loltube.app.data.AppSettings
 import com.loltube.app.data.AspectMode
 import com.loltube.app.data.BufferProfile
+import com.loltube.app.data.ProviderId
 import com.loltube.app.data.QualityMode
 import com.loltube.app.data.SettingsStore
+import com.loltube.app.data.SubColor
+import com.loltube.app.data.SubSize
 import kotlinx.coroutines.launch
 
 private val SUB_LANGUAGES = listOf(
@@ -179,6 +183,118 @@ fun SettingsScreen(onBack: () -> Unit, onOpenLogs: () -> Unit) {
                             }
                         }
                     }
+
+                    CardSubHeader("Text size")
+                    CardDescription("Normal is already smaller than the old built-in renderer.")
+                    SubSize.entries.forEach { s ->
+                        OptionRow("${s.label} (${s.pct}%)", settings.subtitleSize == s) {
+                            scope.launch { SettingsStore.setSubtitleSize(context, s) }
+                        }
+                    }
+
+                    CardSubHeader("Text color")
+                    SubColor.entries.forEach { c ->
+                        val swatch = when (c) {
+                            SubColor.WHITE -> Color(0xFFFFFFFF)
+                            SubColor.YELLOW -> Color(0xFFFFE14D)
+                            SubColor.CYAN -> Color(0xFF4DE5FF)
+                            SubColor.SILVER -> Color(0xFFC9CDD4)
+                        }
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(10.dp))
+                                .clickable { scope.launch { SettingsStore.setSubtitleColor(context, c) } }
+                                .padding(horizontal = 16.dp, vertical = 10.dp),
+                        ) {
+                            Box(
+                                Modifier
+                                    .size(18.dp)
+                                    .clip(CircleShape)
+                                    .background(swatch)
+                                    .border(
+                                        width = if (settings.subtitleColor == c) 2.dp else 1.5.dp,
+                                        color = if (settings.subtitleColor == c) MaterialTheme.colorScheme.primary
+                                        else MaterialTheme.colorScheme.outline,
+                                        shape = CircleShape,
+                                    )
+                            )
+                            Spacer(Modifier.width(12.dp))
+                            Text(
+                                c.label,
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = if (settings.subtitleColor == c) MaterialTheme.colorScheme.onSurface
+                                else MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
+
+                    CardSubHeader("Background darkness")
+                    CardDescription("Behind the subtitle text — 0 = transparent.")
+                    val bgLevels = listOf(0, 25, 55, 80)
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
+                    ) {
+                        bgLevels.forEach { pct ->
+                            val sel = settings.subtitleBgPct == pct ||
+                                (pct == 55 && settings.subtitleBgPct !in bgLevels)
+                            Surface(
+                                color = if (sel) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant,
+                                contentColor = if (sel) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant,
+                                shape = RoundedCornerShape(8.dp),
+                                modifier = Modifier.clickable {
+                                    scope.launch { SettingsStore.setSubtitleBgPct(context, pct) }
+                                },
+                            ) {
+                                Text(
+                                    "$pct%",
+                                    style = MaterialTheme.typography.labelMedium,
+                                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+
+            // ---- subtitle sync per source ----
+            item {
+                SettingsCard(title = "Subtitle sync", icon = Icons.Filled.Timer) {
+                    CardDescription(
+                        "Each source's video copy is trimmed differently, so one subtitle file can run " +
+                            "2–6s early or late depending on the source. Set the offset per source once — " +
+                            "it sticks. (The fastest way: the Sync button while playing.)"
+                    )
+                    Spacer(Modifier.height(4.dp))
+                    ProviderId.entries.forEach { p ->
+                        val delay = settings.subDelayByProvider[p] ?: 0
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp),
+                        ) {
+                            Text(
+                                p.label,
+                                style = MaterialTheme.typography.bodyMedium,
+                                fontWeight = FontWeight.SemiBold,
+                                modifier = Modifier.weight(1f),
+                            )
+                            IconButton(onClick = {
+                                scope.launch { SettingsStore.setSubDelayFor(context, p, delay - 250) }
+                            }) { Text("−", fontWeight = FontWeight.Bold) }
+                            Text(
+                                formatDelay(delay),
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = if (delay != 0) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.padding(horizontal = 4.dp),
+                            )
+                            IconButton(onClick = {
+                                scope.launch { SettingsStore.setSubDelayFor(context, p, delay + 250) }
+                            }) { Text("+", fontWeight = FontWeight.Bold) }
+                        }
+                    }
+                    CardDescription("− = subtitles earlier · + = subtitles later")
                 }
             }
 
@@ -269,6 +385,17 @@ fun SettingsScreen(onBack: () -> Unit, onOpenLogs: () -> Unit) {
             }
         }
     }
+}
+
+/** "+2.5s" / "−1.0s" / "0s" for the per-source sync display. */
+private fun formatDelay(ms: Int): String {
+    val s = kotlin.math.abs(ms) / 1000f
+    val sign = when {
+        ms > 0 -> "+"
+        ms < 0 -> "−"
+        else -> ""
+    }
+    return "$sign${"%.1f".format(s)}s"
 }
 
 /** Rounded card grouping related settings under a bold header with an amber icon. */
