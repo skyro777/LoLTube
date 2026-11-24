@@ -50,6 +50,60 @@ data class SiteSubtitle(
     val coupled: Boolean,
 )
 
+private fun parseListingTracks(body: String): List<Wyzie.Sub> {
+    // Tolerant extractor: the mapple listing arrives inside an RSC stream
+    // (`1[{"lang":...}]`-ish rows) and the /wyzie one as a plain JSON array.
+    // Scan for the first array of objects that carry the track shape.
+    val out = mutableListOf<Wyzie.Sub>()
+    val open = body.indexOf('[')
+    if (open < 0) return out
+    var i = open
+    val n = body.length
+    while (i < n) {
+        val start = body.indexOf('{', i)
+        if (start < 0) break
+        val end = body.indexOf('}', start)
+        if (end < 0) break
+        val obj = body.substring(start, end + 1)
+        fun str(key: String): String? {
+            val k = body.indexOf("\"$key\"", start)
+            if (k < 0 || k > end) return null
+            val colon = body.indexOf(':', k)
+            if (colon < 0 || colon > end) return null
+            var j = colon + 1
+            while (j < n && body[j].isWhitespace()) j++
+            if (j >= n || body[j] != '"') return null
+            val sb = StringBuilder()
+            j++
+            while (j < n && body[j] != '"') {
+                if (body[j] == '\\' && j + 1 < n) j++
+                sb.append(body[j]); j++
+            }
+            return sb.toString()
+        }
+        val url = str("url")
+        if (url == null || !url.startsWith("http")) {
+            i = end + 1
+            continue
+        }
+        val lang = str("lang") ?: str("language")
+        val label = str("label") ?: str("display") ?: lang
+        val hi = Regex("\"isHearingImpaired\"\\s*:\\s*true", RegexOption.IGNORE_CASE)
+            .containsMatchIn(obj)
+        out.add(
+            Wyzie.Sub(
+                display = label ?: "track",
+                language = lang,
+                url = url,
+                encoding = str("encoding"),
+                isHearingImpaired = hi,
+            )
+        )
+        i = end + 1
+    }
+    return out.distinctBy { it.url }.filter { it.url.isNotBlank() }
+}
+
 /** Result of one harvest run: playable stream candidates + subtitle listing +
  *  the site-synced subtitle bodies captured off the page's own downloads. */
 data class HarvestResult(
@@ -112,6 +166,23 @@ class WebViewHarvester(private val context: Context) {
                 "captured subtitle body ${body.length}b ${if (coupled) "STREAM-COUPLED" else "generic"} <- ${url.take(90)}",
             )
         }
+
+        /** A response that carries a LISTING of subtitle tracks (mapple's
+         *  fetchSubtitlesAction server action, or any JSON array with the
+         *  {lang,label,url} track shape). This is the site's OWN menu —
+         * picking from it with the site's own algorithm arms a subtitle
+         * with the exact timeline the site shows in a browser. */
+        @JavascriptInterface
+        fun onSiteSubListing(url: String, body: String) {
+            if (body.length < 20 || body.length > 1_500_000) return
+            if (body.contains("-->")) return // that's a subtitle file, not a listing
+            val tracks = parseListingTracks(body)
+            if (tracks.isEmpty()) return
+            if (tracks.size <= capturedSubs.size) return // keep the richer listing
+            capturedSubs = tracks
+            lastActivityMs = now()
+            AppLog.d("Harvest", "captured ${tracks.size} subtitle track(s) from player listing <- ${url.take(80)}")
+        }
     }
 
     /**
@@ -157,7 +228,9 @@ class WebViewHarvester(private val context: Context) {
                 // the page's auto-selected subtitle download a bounded window —
                 // the site fetches it right around manifest time, and that file
                 // is the stream-coupled subtitle we want to carry into playback.
-                val subDeadline = now() + 4_000
+                // A listing landing late extends the window a little: the site's
+                // own track download follows the listing by a couple of seconds.
+                val subDeadline = now() + (if (capturedSubs.isNotEmpty()) 8_000 else 4_000)
                 repeat(8) {
                     ensureActive()
                     delay(250)
@@ -204,16 +277,25 @@ class WebViewHarvester(private val context: Context) {
             }
 
             /**
-             * The page itself fetches its subtitle listing from `{origin}/wyzie`.
-             * We proxy that request through our own HTTP stack so we can keep a
-             * copy of the JSON - this captures the exact subtitles the provider's
-             * own player would offer, with the page's session context.
+             * The page fetches its subtitle LISTING from `{origin}/wyzie?id=…`.
+             * We proxy THAT request (and only that one) through our own HTTP
+             * stack so we can keep a copy of the JSON — the exact subtitles the
+             * provider's own player offers, with the page's session context.
+             *
+             * IMPORTANT: only the listing (`/wyzie` with an `id` query) is
+             * proxied. The /wyzie/{TOKEN} subtitle FILE downloads must go
+             * through the WebView itself — re-serving them here used to
+             * overwrite their content-type with application/json, which made
+             * the fetch-sniffer reject the page's own subtitle download (the
+             * site-synced capture was silently broken — the root cause of the
+             * wrong-timeline subtitle bug).
              */
             override fun shouldInterceptRequest(view: WebView, request: WebResourceRequest): WebResourceResponse? {
                 val url = request.url
                 val host = url.host ?: return null
                 val path = url.encodedPath ?: ""
-                if (host != pageHost || !path.startsWith("/wyzie")) return null
+                val isListing = host == pageHost && path == "/wyzie" && url.getQueryParameter("id") != null
+                if (!isListing) return null
                 return try {
                     val origin = "https://$pageHost"
                     val req = okhttp3.Request.Builder()
@@ -254,10 +336,9 @@ class WebViewHarvester(private val context: Context) {
                 super.onPageFinished(view, url)
                 view.evaluateJavascript(currentHookJs, null)
                 // nudge playback so hls.js starts pulling manifests/fragments
-                view.evaluateJavascript(
-                    "document.querySelectorAll('video').forEach(function(v){v.muted=true;v.volume=0;var p=v.play();if(p&&p.catch)p.catch(function(){});});",
-                    null
-                )
+                // (the periodic retry inside the hook keeps nudging until the
+                // page's video is actually playing — that's what makes the
+                // site download its auto-selected subtitle, which we capture)
             }
 
             override fun onReceivedSslError(view: WebView?, handler: SslErrorHandler?, error: SslError?) {
@@ -338,16 +419,21 @@ class WebViewHarvester(private val context: Context) {
          *  captures the subtitle file the page itself downloads (the
          *  stream-coupled one), plus seeds the page's stored language so the
          *  site auto-selects the subtitle it would pair with this exact stream
-         *  copy (vidfast/vidcore read localStorage "language" for auto-select). */
+         *  copy (vidfast/vidcore read localStorage "language" for auto-select).
+         *  Also sniffs subtitle LISTING responses (mapple's server action) so
+         *  every provider's own track menu can be replayed app-side. */
         private fun hookJs(prefLang: String): String = """
             (function(){
-              if (window.__loltube_hooked) return;
-              window.__loltube_hooked = true;
+              // seed the site's stored language on EVERY injection — the
+              // document-start context can silently fail (storage not ready),
+              // and the hook guard must not stop the retry.
               try {
                 if (window.localStorage) {
                   localStorage.setItem('language', '__LANG__');
                 }
               } catch(e) {}
+              if (window.__loltube_hooked) return;
+              window.__loltube_hooked = true;
               function send(url, kind){
                 try { __loltube.onCandidate(url, kind); } catch(e) {}
               }
@@ -366,6 +452,21 @@ class WebViewHarvester(private val context: Context) {
                 if (/\.(m4s|ts|webm)(\?|#|$)/i.test(u)) return 'fragment';
                 return null;
               }
+              // keep nudging the page's video to actually PLAY (muted): the
+              // site downloads its auto-selected subtitle around playback —
+              // that file is the stream-coupled subtitle we want to capture.
+              var nudges = 0;
+              try {
+                var nudgeTimer = setInterval(function(){
+                  try {
+                    document.querySelectorAll('video').forEach(function(v){
+                      v.muted = true; v.volume = 0;
+                      var p = v.play(); if (p && p.catch) p.catch(function(){});
+                    });
+                    if (++nudges >= 25) clearInterval(nudgeTimer);
+                  } catch(e) {}
+                }, 1500);
+              } catch(e) {}
               var xo = XMLHttpRequest.prototype.open;
               XMLHttpRequest.prototype.open = function(m, u){
                 try { var k = classify(u); if (k) send(u, k); } catch(e){}
@@ -392,14 +493,24 @@ class WebViewHarvester(private val context: Context) {
                           if (len > 3000000) return;
                           if (/^(video|audio|image|font)\//i.test(ct)) return;
                           var looksSub = /text\//i.test(ct) ||
-                                         /octet-stream|subrip|x-subrip|force-download/i.test(ct) ||
+                                         /octet-stream|subrip|x-subrip|force-download|binary\/octet/i.test(ct) ||
                                          /\.(vtt|srt|ssa|ass)(\?|#|$)/i.test(u);
-                          if (looksSub) {
+                          var looksListing = !/^(video|audio|image|font)\//i.test(ct) &&
+                                             !looksSub;
+                          if (looksSub || looksListing) {
                             resp.clone().text().then(function(t){
                               try {
-                                if (t && t.length > 150 && t.length < 2000000 &&
-                                    t.indexOf('-->') > 0 && t.split('-->').length >= 3) {
+                                if (!t || t.length < 20 || t.length > 2000000) return;
+                                if (t.indexOf('-->') > 0 && t.split('-->').length >= 3) {
                                   __loltube.onSiteSubtitle(u, t);
+                                  return;
+                                }
+                                // subtitle LISTING (mapple's server action / any
+                                // track-array JSON) — the site's own menu
+                                if (t.indexOf('"url"') > 0 &&
+                                    (t.indexOf('"lang"') > 0 || t.indexOf('"language"') > 0 ||
+                                     t.indexOf('"label"') > 0 || t.indexOf('"display"') > 0)) {
+                                  __loltube.onSiteSubListing(u, t);
                                 }
                               } catch(e3) {}
                             }).catch(function(){});

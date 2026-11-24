@@ -22,14 +22,23 @@ class StreamResolver(private val context: Context) {
     /**
      * Tries each provider in [order] until one yields a verified stream.
      * Returns the stream plus per-provider error info for the diagnostics UI.
+     *
+     * [excludeHost]: when set (the watchdog auto-switch passing the host the
+     * current stream is stalling on), keep resolving past providers that land
+     * on that same CDN backend — providers often share one backend (vidcore +
+     * vidfast both serve from moon.goldenkite.top), and switching between
+     * them changes nothing. Falls back to the first verified stream if every
+     * provider resolves to the excluded host.
      */
     suspend fun resolve(
         request: PlaybackRequest,
         order: List<ProviderId>,
         prefSubLang: String = "en",
+        excludeHost: String? = null,
         onStatus: suspend (ProviderId, String) -> Unit = { _, _ -> },
     ): Pair<ResolvedStream?, List<Attempt>> {
         val attempts = mutableListOf<Attempt>()
+        var fallback: ResolvedStream? = null
         for (id in order) {
             val embed = Providers.embedUrl(id, request)
             if (embed == null) {
@@ -62,7 +71,7 @@ class StreamResolver(private val context: Context) {
                 continue
             }
 
-            return ResolvedStream(
+            val stream = ResolvedStream(
                 url = verified.url,
                 kind = verified.kind,
                 provider = id,
@@ -70,9 +79,17 @@ class StreamResolver(private val context: Context) {
                 allCandidates = candidates,
                 subs = harvest.subs,
                 siteSubs = harvest.siteSubs,
-            ) to attempts
+            )
+            val host = try { android.net.Uri.parse(verified.url).host } catch (t: Throwable) { null }
+            if (excludeHost == null || host != excludeHost) return stream to attempts
+            if (fallback == null) {
+                fallback = stream
+                AppLog.d("Resolver", "${id.label} resolved to the stalled backend ($host) — trying the other provider(s)…")
+            }
         }
-        return null to attempts
+        // every provider sits on the excluded backend — the fallback is still
+        // a fresh token/copy, which sometimes is all the CDN needed
+        return (fallback ?: null) to attempts
     }
 }
 

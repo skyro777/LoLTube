@@ -180,6 +180,7 @@ fun PosterCard(
                 entry.name,
                 style = MaterialTheme.typography.bodySmall,
                 fontWeight = FontWeight.Medium,
+                color = MaterialTheme.colorScheme.onBackground,
                 maxLines = 2,
                 overflow = TextOverflow.Ellipsis,
                 textAlign = TextAlign.Start,
@@ -217,6 +218,7 @@ fun MediaRow(
                 title,
                 style = MaterialTheme.typography.titleMedium,
                 fontWeight = FontWeight.ExtraBold,
+                color = MaterialTheme.colorScheme.onBackground,
             )
             if (subtitle != null) {
                 Spacer(Modifier.width(8.dp))
@@ -252,6 +254,10 @@ fun SectionHeader(text: String, modifier: Modifier = Modifier) {
             style = MaterialTheme.typography.titleMedium,
             fontWeight = FontWeight.ExtraBold,
             letterSpacing = 0.2.sp,
+            // explicit onBackground: without a Surface ancestor the default
+            // LocalContentColor is BLACK — the "invisible category titles on
+            // the dark home screen" bug
+            color = MaterialTheme.colorScheme.onBackground,
         )
     }
 }

@@ -183,6 +183,12 @@ class PlayerViewModel(
     @Volatile private var stallStage = 0
     @Volatile private var hadFirstReady = false
     @Volatile private var switchingSource = false
+    /** Since the player last reported STATE_IDLE while we were in Phase.Ready —
+     *  a wedged loader that stops emitting events entirely. */
+    @Volatile private var idleSinceMs = 0L
+    /** Wedged-loader rebuilds since the last READY — bounded so a dead stream
+     *  can't rebuild forever. */
+    @Volatile private var idleRebuilds = 0
 
     // self-healing recovery ladder (see onPlayerError):
     // 0 = clean, 1 = full rebuild (fresh codecs, same quality), 2 = rebuild
@@ -263,12 +269,23 @@ class PlayerViewModel(
                     hadFirstReady = true
                     bufferingSinceMs = 0
                     stallStage = 0
+                    idleSinceMs = 0
+                    idleRebuilds = 0
                     if (cleanSinceMs == 0L) cleanSinceMs = android.os.SystemClock.elapsedRealtime()
                 }
 
                 Player.STATE_ENDED -> onEnded()
 
+                Player.STATE_IDLE -> {
+                    // an IDLE player with no error callback is a wedged loader —
+                    // track it so the loop can hard-rebuild (the automated
+                    // equivalent of the force-close + reopen the user had to do)
+                    if (idleSinceMs == 0L) idleSinceMs = android.os.SystemClock.elapsedRealtime()
+                    AppLog.d("Player", "state -> IDLE (unprepared / wedged loader)")
+                }
+
                 Player.STATE_BUFFERING -> {
+                    idleSinceMs = 0
                     val now = android.os.SystemClock.elapsedRealtime()
                     if (bufferingSinceMs == 0L) bufferingSinceMs = now
                     if (_isPlaying.value) {
@@ -278,12 +295,16 @@ class PlayerViewModel(
                             _stats.value = _stats.value.copy(rebuffers = rebufferTimes.size)
                             // 4 rebuffers in a minute while on an uncapped mode ->
                             // the line clearly can't sustain it, step down.
+                            // SESSION-ONLY (never persisted): the line's real speed
+                            // deserves a fresh test every session — the persisted
+                            // auto-cap is what made "reinstall = permanent 1080p",
+                            // since a single cold-start stall wrote CAP_1080 forever.
                             if (rebufferTimes.size >= 4 &&
                                 (_qualityMode.value == QualityMode.AUTO || _qualityMode.value == QualityMode.MAX)
                             ) {
                                 rebufferTimes.clear()
-                                setQuality(QualityMode.CAP_1080)
-                                _message.value = "Network can't sustain this quality — capped to 1080p"
+                                setQuality(QualityMode.CAP_1080, persist = false)
+                                _message.value = "Network can't sustain this quality — capped to 1080p for this session"
                             }
                         }
                     }
@@ -568,8 +589,12 @@ class PlayerViewModel(
      *     exact bytes the site pairs with the stream copy it served; the timeline
      *     is correct by construction),
      *  2. the site's own listing ([providerSubs], captured from the page's
-     *     /wyzie call) — matched to the IMDb id, i.e. the site's fallback tier,
-     *  3. the direct API fallback ([_subs]).
+     *     /wyzie call or player action) — picked with the SITE'S OWN selection
+     *     algorithm, so the app downloads the exact track the site's player
+     *     would have armed (UTF-8 first, non-HI before HI, first track of the
+     *     preferred language — verified from the sites' bundles),
+     *  3. the direct API fallback ([_subs]) — a generic index matched to the
+     *     IMDb id only (timing not guaranteed).
      */
     private suspend fun preAttachSubtitle() {
         if (!settings.subtitlesEnabled) return
@@ -582,17 +607,34 @@ class PlayerViewModel(
             if (armSiteSubtitle(coupled.first())) return
         }
 
+        val siteNative = providerSubs.isNotEmpty()
         val pool = providerSubs.ifEmpty { _subs.value }
         if (pool.isEmpty()) return // nothing to pick from yet; a later listing can still attach
 
         val pref = (desiredSubLang ?: settings.preferredSubtitleLang).lowercase()
-        val pick = pool.firstOrNull { s -> s.language?.lowercase()?.startsWith(pref) == true }
-            ?: pool.firstOrNull { s -> s.display.lowercase().startsWith(pref) }
-            ?: pool.firstOrNull { s ->
+        // THE SITE'S OWN SELECTION ALGORITHM (vidfast/vidcore, from their
+        // bundles): sort the listing UTF-8-encoding-first, non-HI-before-HI,
+        // then arm the FIRST track of the stored language. The old code took
+        // the first language match in RAW order — with 34 tracks for a movie
+        // that lands on a *different file* than the site's pick (different
+        // release/fps), which was the "subtitles at arbitrary timelines on
+        // every content" bug. mapple sorts nothing and picks the first
+        // en/english track — a stable sort over an encoding-less listing
+        // preserves exactly that order.
+        val sorted = pool.sortedWith(
+            compareBy<Wyzie.Sub>(
+                { (it.encoding ?: "").uppercase() != "UTF-8" }, // UTF-8 first
+                { it.isHearingImpaired == true }, // non-HI first
+            )
+        )
+        val pick = sorted.firstOrNull { s -> s.language?.lowercase() == pref }
+            ?: sorted.firstOrNull { s -> s.language?.lowercase()?.startsWith(pref) == true }
+            ?: sorted.firstOrNull { s -> s.display.lowercase().startsWith(pref) }
+            ?: sorted.firstOrNull {
                 s.language?.lowercase() == "en" || s.display.contains("english", true)
             }
             ?: return
-        attachSubtitleCues(pick)
+        attachSubtitleCues(pick, siteNative = siteNative)
     }
 
     /**
@@ -634,8 +676,13 @@ class PlayerViewModel(
         }
     }
 
-    /** Download, parse and arm a subtitle for the overlay. Returns success. */
-    private suspend fun attachSubtitleCues(sub: Wyzie.Sub): Boolean {
+    /** Download, parse and arm a subtitle for the overlay. [siteNative] marks
+     *  tracks that came from the SITE'S OWN listing (page /wyzie call or player
+     *  action): those are paired with the exact stream copy the site serves —
+     *  the timeline is correct by construction, so the per-provider sync
+     *  offset (calibrated for *generic* index tracks) is deliberately NOT
+     *  applied — manual nudges still work on top at any time. */
+    private suspend fun attachSubtitleCues(sub: Wyzie.Sub, siteNative: Boolean = false): Boolean {
         val dl = kotlinx.coroutines.withTimeoutOrNull(6_000) { Wyzie.download(sub) }
         if (dl == null) {
             AppLog.d("Subs", "download failed/timed out (${sub.display}) — menu selection stays available")
@@ -651,13 +698,24 @@ class PlayerViewModel(
         desiredSubLang = sub.language ?: sub.display
         userTurnedSubsOff = false
         _activeSubLabel.value = sub.display
-        currentStream?.let {
-            _subDelayMs.value = settings.subDelayByProvider[it.provider] ?: 0
+        if (siteNative) {
+            // site-paired track: exact timeline for THIS stream copy — sync 0
+            // (a legacy per-provider offset was calibrated for a different
+            // subtitle file and would re-break the timeline)
+            _subDelayMs.value = 0
+            AppLog.d(
+                "Subs",
+                "SITE-PAIRED subtitle \"${sub.display}\" armed (site's own track pick): ${cues.size} cues, sync=0ms",
+            )
+        } else {
+            currentStream?.let {
+                _subDelayMs.value = settings.subDelayByProvider[it.provider] ?: 0
+            }
+            AppLog.d(
+                "Subs",
+                "overlay subtitle \"${sub.display}\" armed: ${cues.size} cues, sync=${_subDelayMs.value}ms for ${currentStream?.provider?.label ?: "?"}",
+            )
         }
-        AppLog.d(
-            "Subs",
-            "overlay subtitle \"${sub.display}\" armed: ${cues.size} cues, sync=${_subDelayMs.value}ms for ${currentStream?.provider?.label ?: "?"}",
-        )
         return true
     }
 
@@ -721,16 +779,28 @@ class PlayerViewModel(
         req: PlaybackRequest,
         reusePlayer: Boolean,
         forceOrder: List<ProviderId>? = null,
+        excludeHost: String? = null,
     ) {
         viewModelScope.launch {
             _phase.value = Phase.Resolving((forceOrder?.first() ?: providerChoice)?.label ?: "Auto", "Starting…")
             val order = forceOrder ?: providerChoice?.let { listOf(it) } ?: settings.providerOrder
 
-            val (stream, attempts) = resolver.resolve(req, order, settings.preferredSubtitleLang) { id, status ->
+            val (stream, attempts) = resolver.resolve(req, order, settings.preferredSubtitleLang, excludeHost) { id, status ->
                 _phase.value = Phase.Resolving(id.label, status)
             }
 
             if (stream == null) {
+                if (reusePlayer) {
+                    // an auto-switch that failed to resolve must not permanently
+                    // disable future switches (the old code left
+                    // switchingSource latched forever after one failed switch);
+                    // remember which providers hard-failed so the next attempt
+                    // rotates to an untried one instead of looping
+                    switchingSource = false
+                    attempts.forEach { failedProviders.add(it.provider) }
+                    stallStage = 2 // re-arm the watchdog so it can try the next source
+                    if (bufferingSinceMs == 0L) bufferingSinceMs = android.os.SystemClock.elapsedRealtime()
+                }
                 if (!reusePlayer) releasePlayer()
                 _phase.value = Phase.Failed(
                     attempts.joinToString("\n") { "${it.provider.label}: ${it.error ?: "unknown error"}" }
@@ -808,6 +878,17 @@ class PlayerViewModel(
             bufferingSinceMs = 0
             stallStage = 0
             switchingSource = false
+            idleSinceMs = 0
+
+            // a watchdog switch that landed on the SAME CDN backend the old
+            // source was stalling on is worth knowing in the log
+            if (reusePlayer) {
+                val oldHost = excludeHost
+                val newHost = android.net.Uri.parse(stream.url).host
+                if (oldHost != null && oldHost == newHost) {
+                    AppLog.d("Watchdog", "switched to ${stream.provider.label} but backend host is unchanged ($newHost)")
+                }
+            }
 
             val mediaItem = PlayerEngine.buildMediaItem(stream.url, stream.kind, null)
             p.setMediaItem(mediaItem, if (req.startAtMs > 0) req.startAtMs else 0)
@@ -902,8 +983,16 @@ class PlayerViewModel(
                 bufferingSinceMs = now
                 stallStage = 1
                 if (!locked && _qualityMode.value == QualityMode.AUTO) {
-                    setQuality(QualityMode.CAP_1080)
-                    _message.value = "Slow line detected — capped to 1080p for smooth playback"
+                    // SESSION-ONLY cap: a cold-start stall must not write
+                    // CAP_1080 into DataStore — that persistence is what made
+                    // "first open after reinstall never loads, then 1080p
+                    // forever" (fresh install = AUTO = top variant on a cold
+                    // line; the stall wrote the cap; every later session
+                    // started capped). The session cap still rescues THIS
+                    // playback, and the next session re-tests the line.
+                    setQuality(QualityMode.CAP_1080, persist = false)
+                    _message.value = "Slow line detected — capped to 1080p, restarting the stream…"
+                    reprepareStream("Slow line — capped to 1080p, restarting stream")
                 } else {
                     reprepareStream(
                         if (locked) "Holding 4K — reconnecting stream…"
@@ -926,31 +1015,60 @@ class PlayerViewModel(
         }
     }
 
+    /** REAL reconnect: re-set the same MediaItem at the current position and
+     *  prepare from scratch. A bare `prepare()` is a no-op on a player that is
+     *  already in the preparing/buffering state — it does NOT cancel a hung
+     *  loader request, which is why the old "reconnect" never actually
+     *  reloaded anything (the first-open stall just sat there). Re-setting the
+     *  media item tears the loading pipeline down and restarts it. */
     private fun reprepareStream(msg: String) {
         val p = player.value ?: return
+        val item = p.currentMediaItem ?: return
+        val pos = _positionMs.value.coerceAtLeast(0)
         AppLog.d("Watchdog", msg)
         _message.value = msg
         try {
+            p.setMediaItem(item, pos)
             p.prepare()
+            p.playWhenReady = true
         } catch (t: Throwable) {
-            AppLog.d("Watchdog", "prepare failed: ${t.message}")
+            AppLog.d("Watchdog", "re-prepare failed: ${t.message}")
         }
     }
 
     private fun autoSwitchProvider(next: ProviderId? = null) {
         if (switchingSource) return
         val stream = currentStream ?: return
-        val order = settings.providerOrder
-        if (order.size < 2) return
+        val order = settings.providerOrder.filter { it !in failedProviders }
+        if (order.size < 2) {
+            AppLog.d("Watchdog", "no other provider left to try (${failedProviders.size} failed) — holding")
+            return
+        }
         val target = next ?: run {
             val idx = order.indexOf(stream.provider)
-            order[(idx + 1) % order.size]
+            if (idx < 0) order.first() else order[(idx + 1) % order.size]
         }
         switchingSource = true
         AppLog.d("Watchdog", "stalling on ${stream.provider.label} — switching to ${target.label}")
         _message.value = "This source is stalling — switching to ${target.label}…"
         val pos = _positionMs.value
-        startResolve(currentRequest.copy(startAtMs = pos), reusePlayer = true, forceOrder = listOf(target))
+        // Providers often share one CDN backend (vidcore + vidfast both serve
+        // from moon.goldenkite.top) — switching between them changes nothing.
+        // Resolve the REST of the provider list in one pass and prefer a stream
+        // from a DIFFERENT backend host when one verifies.
+        val excludeHost = android.net.Uri.parse(stream.url).host
+        val curIdx = order.indexOf(stream.provider)
+        val restOrder = if (curIdx >= 0) {
+            order.drop(curIdx + 1) + order.take(curIdx)
+        } else {
+            order
+        }
+        startResolve(
+            currentRequest.copy(startAtMs = pos),
+            reusePlayer = true,
+            forceOrder = restOrder.ifEmpty { listOf(target) },
+            excludeHost = excludeHost,
+        )
     }
 
     // ---- progress ----------------------------------------------------------
@@ -968,6 +1086,27 @@ class PlayerViewModel(
                 if (pl.duration > 0) _durationMs.value = pl.duration
                 _bufferedMs.value = pl.bufferedPosition.coerceAtLeast(0)
                 checkStallWatchdog()
+
+                // Wedged-loader guard: a player that sits in STATE_IDLE for >10s
+                // in Phase.Ready is a loader that will never emit another event
+                // (observed: watchdog went fully silent after a source switch —
+                // no BUFFERING, no error, nothing). The automated equivalent of
+                // the force-close + reopen that fixed it manually: a FULL player
+                // rebuild on the same stream at the same position.
+                if (idleSinceMs > 0 && !switchingSource && _phase.value is Phase.Ready) {
+                    val idleFor = android.os.SystemClock.elapsedRealtime() - idleSinceMs
+                    if (idleFor > 10_000) {
+                        idleSinceMs = 0
+                        if (idleRebuilds < 2) {
+                            idleRebuilds++
+                            AppLog.d("Watchdog", "player idle ${idleFor / 1000}s with no events — full rebuild ($idleRebuilds/2)")
+                            _message.value = "Reconnecting the stream…"
+                            rebuildAtPosition(capHeight = null, safeMode = false)
+                        } else {
+                            AppLog.d("Watchdog", "player idle ${idleFor / 1000}s — rebuild budget spent, letting the stall watchdog/source-switch handle it")
+                        }
+                    }
+                }
 
                 // 20s of clean playback re-arms the recovery ladder from stage 0
                 if (cleanSinceMs > 0 && recoveryStage > 0 && !switchingSource) {
@@ -1046,7 +1185,7 @@ class PlayerViewModel(
         seekTo(_positionMs.value + deltaMs)
     }
 
-    fun setQuality(mode: QualityMode) {
+    fun setQuality(mode: QualityMode, persist: Boolean = true) {
         _qualityMode.value = mode
         val p = player.value ?: return
         PlayerEngine.applyQualityMode(p, mode, sessionDecoderCap)
@@ -1055,7 +1194,13 @@ class PlayerViewModel(
         // rendition, no reload); other modes return to adaptive selection.
         p.trackSelectionParameters = p.trackSelectionParameters.buildUpon()
             .clearOverridesOfType(C.TRACK_TYPE_VIDEO).build()
-        viewModelScope.launch { SettingsStore.setQuality(context, mode) }
+        // Only the USER's explicit choice is persisted. Watchdog auto-caps are
+        // session-only (persist=false): an automatic degradation must never
+        // outlive the session — it otherwise silently downgraded 4K forever
+        // after one bad night, and made reinstall reproduce the whole failure.
+        if (persist) {
+            viewModelScope.launch { SettingsStore.setQuality(context, mode) }
+        }
     }
 
     fun setAspect(mode: AspectMode) {
@@ -1107,7 +1252,11 @@ class PlayerViewModel(
             return
         }
         viewModelScope.launch {
-            if (!attachSubtitleCues(sub)) {
+            // a menu track that comes from the site's own listing is site-paired
+            // (correct timeline by construction → sync 0); generic index
+            // tracks keep the persisted per-provider offset
+            val siteNative = providerSubs.any { it.url == sub.url }
+            if (!attachSubtitleCues(sub, siteNative = siteNative)) {
                 _message.value = "Couldn't download subtitle (${sub.display})"
             }
         }

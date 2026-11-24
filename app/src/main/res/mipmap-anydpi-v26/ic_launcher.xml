@@ -1,9 +1,0 @@
-<?xml version="1.0" encoding="utf-8"?>
-<!-- The user's own logo, full-bleed as the adaptive icon's BACKGROUND layer
-     (edge-to-edge under whatever mask the launcher applies — circle, squircle,
-     rounded square). The foreground is a transparent no-op so the artwork is
-     not cropped by the 66/108dp safe zone. -->
-<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
-    <background android:drawable="@mipmap/ic_launcher_bg" />
-    <foreground android:drawable="@drawable/ic_launcher_fg_none" />
-</adaptive-icon>

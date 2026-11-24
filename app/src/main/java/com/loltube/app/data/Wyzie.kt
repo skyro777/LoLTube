@@ -17,6 +17,7 @@ object Wyzie {
         val language: String? = null,
         val url: String = "",
         val encoding: String? = null,
+        val isHearingImpaired: Boolean? = null,
     )
 
     private val ORIGINS = listOf("https://vidfast.vc", "https://vidcore.io")
@@ -61,6 +62,9 @@ object Wyzie {
     suspend fun download(sub: Sub): Pair<java.io.File, String>? = withContext(Dispatchers.IO) {
         val referers = listOfNotNull(
             sub.url.takeIf { it.startsWith("http") }?.let { "https://${android.net.Uri.parse(it).host}/" },
+            // mapple's own track URLs are served under its origins
+            "https://mappletv.uk/",
+            "https://mapple.fun/",
             "https://vidfast.vc/",
             "https://vidcore.io/",
             "", // no referer at all
