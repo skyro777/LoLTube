@@ -630,7 +630,7 @@ class PlayerViewModel(
         val pick = sorted.firstOrNull { s -> s.language?.lowercase() == pref }
             ?: sorted.firstOrNull { s -> s.language?.lowercase()?.startsWith(pref) == true }
             ?: sorted.firstOrNull { s -> s.display.lowercase().startsWith(pref) }
-            ?: sorted.firstOrNull {
+            ?: sorted.firstOrNull { s ->
                 s.language?.lowercase() == "en" || s.display.contains("english", true)
             }
             ?: return
