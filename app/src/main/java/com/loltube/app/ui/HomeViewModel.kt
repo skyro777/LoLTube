@@ -10,6 +10,7 @@ import com.loltube.app.data.ImdbSuggest
 import com.loltube.app.data.ProgressStore
 import com.loltube.app.util.AppLog
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -23,6 +24,10 @@ class HomeViewModel(app: Application) : AndroidViewModel(app) {
         val continueWatching: List<ProgressStore.WatchProgress> = emptyList(),
         val topMovies: List<CatalogEntry> = emptyList(),
         val topSeries: List<CatalogEntry> = emptyList(),
+        val topRatedMovies: List<CatalogEntry> = emptyList(),
+        val topRatedSeries: List<CatalogEntry> = emptyList(),
+        val newMovies: List<CatalogEntry> = emptyList(),
+        val newSeries: List<CatalogEntry> = emptyList(),
         val genre: String? = null,
         val gridItems: List<CatalogEntry> = emptyList(),
         val gridLoading: Boolean = false,
@@ -38,24 +43,59 @@ class HomeViewModel(app: Application) : AndroidViewModel(app) {
 
     private var gridSkip = 0
     private var searchJob: Job? = null
+    private var lastRefreshMs = 0L
 
     init {
         refresh()
     }
 
+    /**
+     * Full refresh: continue-watching + ALL catalog rows, fetched in parallel
+     * (6 feeds in ~1 round-trip instead of 6 sequential ones).
+     */
     fun refresh() {
+        lastRefreshMs = android.os.SystemClock.elapsedRealtime()
         viewModelScope.launch {
             _state.value = _state.value.copy(initialLoading = true)
-            val cont = ProgressStore.continueWatching(getApplication())
-            val movies = Cinemeta.catalog(Catalog.MOVIE)
-            val series = Cinemeta.catalog(Catalog.SERIES)
+            val cont = async { ProgressStore.continueWatching(getApplication()) }
+            val movies = async { Cinemeta.catalog(Catalog.MOVIE) }
+            val series = async { Cinemeta.catalog(Catalog.SERIES) }
+            val ratedMovies = async { Cinemeta.topRated(Catalog.MOVIE) }
+            val ratedSeries = async { Cinemeta.topRated(Catalog.SERIES) }
+            val newMovies = async { Cinemeta.newReleases(Catalog.MOVIE) }
+            val newSeries = async { Cinemeta.newReleases(Catalog.SERIES) }
+            // parallel: all seven fetches are already in flight — await in order
+            val contv = cont.await()
+            val moviesv = movies.await()
+            val seriesv = series.await()
+            val ratedMoviesv = ratedMovies.await()
+            val ratedSeriesv = ratedSeries.await()
+            val newMoviesv = newMovies.await()
+            val newSeriesv = newSeries.await()
             _state.value = _state.value.copy(
                 initialLoading = false,
-                continueWatching = cont,
-                topMovies = movies,
-                topSeries = series,
+                continueWatching = contv,
+                topMovies = moviesv,
+                topSeries = seriesv,
+                topRatedMovies = ratedMoviesv,
+                topRatedSeries = ratedSeriesv,
+                newMovies = newMoviesv,
+                newSeries = newSeriesv,
             )
         }
+    }
+
+    /**
+     * Refresh when the user comes BACK to the home screen (returning from the
+     * player, another app, or the TV screensaver): Continue Watching and the
+     * rows update with fresh content without a manual restart. Throttled to
+     * one refresh per 30s so D-pad wandering between screens never hammers
+     * the feeds.
+     */
+    fun refreshIfStale() {
+        val now = android.os.SystemClock.elapsedRealtime()
+        val hasData = _state.value.topMovies.isNotEmpty()
+        if (!hasData || now - lastRefreshMs > 30_000) refresh()
     }
 
     fun setTab(tab: Int) {

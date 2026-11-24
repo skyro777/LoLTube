@@ -4,11 +4,12 @@ import com.loltube.app.util.AppLog
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
-import java.io.IOException
 
 /**
  * Cinemeta (Stremio's public metadata API) - keyless catalog & details.
- * Endpoints verified live: /catalog/{type}/top[/genre=X&skip=N][.json], /meta/{type}/{imdb}.json
+ * Endpoints verified live: /catalog/{type}/{catalogId}[/genre=X&skip=N][.json],
+ * /meta/{type}/{imdb}.json. Catalog ids in use: top (Popular), imdbRating
+ * (Top Rated), year (New Releases — genre=YEAR is required there).
  * Every meta carries `moviedb_id` (TMDB id) which the Mapple provider needs.
  */
 object Cinemeta {
@@ -108,23 +109,46 @@ object Cinemeta {
         )
     }
 
-    /** Browse a catalog page. type = "movie"|"series". */
-    suspend fun catalog(type: String, genre: String? = null, skip: Int = 0): List<CatalogEntry> =
-        withContext(Dispatchers.IO) {
-            runCatching {
-                val filters = buildList {
-                    genre?.let { add("genre=$it") }
-                    if (skip > 0) add("skip=$skip")
-                }
-                val url = if (filters.isEmpty()) "$BASE/catalog/$type/top.json"
-                else "$BASE/catalog/$type/top/${filters.joinToString("&")}.json"
-                val body = Net.get(url)
-                Net.json.decodeFromString(CatalogResponse.serializer(), body).metas
-                    .filter { it.id.startsWith("tt") }
-                    .map { it.toEntry(type) }
-            }.onFailure { AppLog.e("Cinemeta", "catalog failed: ${it.message}") }
-                .getOrDefault(emptyList())
-        }
+    /**
+     * Browse a catalog page. type = "movie"|"series"; catalogId =
+     * "top" (Popular) | "imdbRating" (Top Rated) | "year" (New Releases —
+     * then [genre] must be the year, see [newReleases]).
+     */
+    suspend fun catalog(
+        type: String,
+        genre: String? = null,
+        skip: Int = 0,
+        catalogId: String = "top",
+    ): List<CatalogEntry> = withContext(Dispatchers.IO) {
+        runCatching {
+            val filters = buildList {
+                genre?.let { add("genre=$it") }
+                if (skip > 0) add("skip=$skip")
+            }
+            val url = if (filters.isEmpty()) "$BASE/catalog/$type/$catalogId.json"
+            else "$BASE/catalog/$type/$catalogId/${filters.joinToString("&")}.json"
+            val body = Net.get(url)
+            Net.json.decodeFromString(CatalogResponse.serializer(), body).metas
+                .filter { it.id.startsWith("tt") }
+                .map { it.toEntry(type) }
+        }.onFailure { AppLog.e("Cinemeta", "catalog $catalogId/$type failed: ${it.message}") }
+            .getOrDefault(emptyList())
+    }
+
+    /** Highest-rated titles of a type (the "Featured" catalog). */
+    suspend fun topRated(type: String): List<CatalogEntry> =
+        catalog(type, catalogId = "imdbRating")
+
+    /**
+     * New releases of a type for the current year (Cinemeta's "year" catalog —
+     * the genre parameter carries the YEAR there). Early in a year the feed can
+     * still be thin, so it falls back to last year.
+     */
+    suspend fun newReleases(type: String): List<CatalogEntry> {
+        val year = java.time.Year.now().value
+        val cur = catalog(type, genre = year.toString(), catalogId = "year")
+        return cur.ifEmpty { catalog(type, genre = (year - 1).toString(), catalogId = "year") }
+    }
 
     /**
      * Full-text search across movies and series (Cinemeta's own search catalog).

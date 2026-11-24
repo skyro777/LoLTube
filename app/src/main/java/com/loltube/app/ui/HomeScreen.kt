@@ -47,6 +47,7 @@ import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.derivedStateOf
@@ -66,8 +67,14 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.viewmodel.compose.viewModel
 import coil.compose.AsyncImage
+import androidx.compose.foundation.Image
+import androidx.compose.ui.res.painterResource
+import com.loltube.app.R
 import com.loltube.app.data.Catalog
 import com.loltube.app.data.CatalogEntry
 import com.loltube.app.data.ProgressStore
@@ -87,6 +94,18 @@ fun HomeScreen(
     val vm: HomeViewModel = viewModel()
     val state by vm.state.collectAsState()
 
+    // Coming back to Home (from the player / another app / screensaver):
+    // refresh Continue Watching + the catalog rows so new content and fresh
+    // progress always show up without restarting the app. Throttled in the VM.
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) vm.refreshIfStale()
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+
     Column(
         Modifier
             .fillMaxSize()
@@ -99,6 +118,14 @@ fun HomeScreen(
                 .fillMaxWidth()
                 .padding(start = 16.dp, end = 8.dp, top = 10.dp, bottom = 2.dp),
         ) {
+            Image(
+                painter = painterResource(R.mipmap.ic_launcher_bg),
+                contentDescription = null,
+                modifier = Modifier
+                    .size(34.dp)
+                    .clip(RoundedCornerShape(9.dp)),
+            )
+            Spacer(Modifier.width(10.dp))
             Text(
                 "LoLTube",
                 style = MaterialTheme.typography.headlineSmall.copy(
@@ -269,6 +296,34 @@ private fun HomeTab(
             PosterRow(
                 title = "Top Series",
                 items = state.topSeries,
+                onOpen = onOpen,
+            )
+        }
+        item {
+            PosterRow(
+                title = "Top Rated Movies",
+                items = state.topRatedMovies,
+                onOpen = onOpen,
+            )
+        }
+        item {
+            PosterRow(
+                title = "New Movie Releases",
+                items = state.newMovies,
+                onOpen = onOpen,
+            )
+        }
+        item {
+            PosterRow(
+                title = "Top Rated Series",
+                items = state.topRatedSeries,
+                onOpen = onOpen,
+            )
+        }
+        item {
+            PosterRow(
+                title = "New Series Releases",
+                items = state.newSeries,
                 onOpen = onOpen,
             )
         }
