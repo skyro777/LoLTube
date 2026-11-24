@@ -106,7 +106,7 @@ object StorageJanitor {
                     flush()
                 }
             }
-            runCatching { android.webkit.WebStorage.deleteAllData() }
+            runCatching { android.webkit.WebStorage.getInstance().deleteAllData() }
             done.countDown()
         }
         // never block the exit path for more than 2s
