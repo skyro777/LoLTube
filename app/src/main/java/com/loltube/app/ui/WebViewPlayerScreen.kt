@@ -20,12 +20,17 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.Surface
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
+import com.loltube.app.ui.components.ImmersiveLoading
 import com.loltube.app.util.AppLog
 
 /**
@@ -37,6 +42,9 @@ import com.loltube.app.util.AppLog
 fun WebViewPlayerScreen(url: String, onBack: () -> Unit) {
     val pageHost = remember(url) { android.net.Uri.parse(url).host ?: "" }
     BackHandler(onBack = onBack)
+
+    // modern immersive loading until the page has rendered its player
+    var pageReady by remember { mutableStateOf(false) }
 
     Box(
         Modifier
@@ -64,6 +72,11 @@ fun WebViewPlayerScreen(url: String, onBack: () -> Unit) {
                             return block
                         }
 
+                        override fun onPageStarted(view: WebView, u: String, favicon: android.graphics.Bitmap?) {
+                            super.onPageStarted(view, u, favicon)
+                            pageReady = false
+                        }
+
                         override fun onPageFinished(view: WebView, u: String) {
                             super.onPageFinished(view, u)
                             view.evaluateJavascript(
@@ -83,6 +96,10 @@ fun WebViewPlayerScreen(url: String, onBack: () -> Unit) {
                                 """.trimIndent(),
                                 null,
                             )
+                            // keep the immersive loader up a short beat past
+                            // onPageFinished - the player still mounts its video
+                            // right after the DOM is ready
+                            view.postDelayed({ pageReady = true }, 900)
                         }
                     }
                     webChromeClient = object : WebChromeClient() {
@@ -100,6 +117,15 @@ fun WebViewPlayerScreen(url: String, onBack: () -> Unit) {
             },
             modifier = Modifier.fillMaxSize(),
         )
+
+        if (!pageReady) {
+            ImmersiveLoading(
+                posterUrl = null,
+                title = null,
+                status = "Loading the site's own player…",
+                modifier = Modifier.fillMaxSize(),
+            )
+        }
 
         // small always-visible back button so the user can never get stuck
         Surface(

@@ -64,6 +64,7 @@ import com.loltube.app.data.EpisodeInfo
 import com.loltube.app.data.MediaDetails
 import com.loltube.app.data.ProgressStore
 import com.loltube.app.providers.ProviderId
+import com.loltube.app.ui.components.ImmersiveLoading
 import com.loltube.app.ui.components.SectionHeader
 import com.loltube.app.util.Format
 
@@ -84,9 +85,12 @@ fun DetailsScreen(
 
     val details = state.details
     if (state.loading) {
-        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-            CircularProgressIndicator(color = MaterialTheme.colorScheme.primary, strokeWidth = 3.dp)
-        }
+        // modern immersive loading instead of a bare spinner
+        ImmersiveLoading(
+            posterUrl = null,
+            title = null,
+            status = "Loading details…",
+        )
         return
     }
     if (details == null) {

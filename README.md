@@ -13,7 +13,14 @@ Grab the APK from the [**Latest Build** release](../../releases/tag/latest):
 
 Every push to `main` rebuilds it automatically (GitHub Actions).
 
-## What's new in v0.8.0
+## What's new in v0.9.0
+
+- **Subtitle timing FIXED at the root: site-synced subtitles.** The sites pair each stream copy with a specific subtitle file (vidfast/vidcore decrypt the track list inside the page and download the one for your language; mapple auto-selects from its own backend). The old pipeline used the sites' *fallback* `/wyzie` listing — matched to the IMDb id, not the video copy — so a different cut/release could drift by seconds or minutes, differently on every title. Now the hidden harvester WebView **captures the subtitle file the page itself downloads** (your preferred language is seeded into the page first), and playback uses those exact bytes — the timeline is right by construction, no re-download. The `/wyzie` listing and the manual **±60 s ms-precision sync sliders** remain as fallback/fine-tuning. Look for **“Site-synced”** in the player's Subs menu.
+- **Horizontal stretch truly fills now.** The old stretch scaled a *letterboxed* surface, which got cropped at the frame's own bounds — so the video stretched but stayed *behind* the left/right black bars. Any covering mode (Auto-fill / Stretch / Zoom / manual stretch) now switches the player frame itself to **full-screen fill** (hardware `object-fit: fill`-equivalent, exactly what the sites do), and extra stretching crops at the *screen* edges — never behind bars. This also fixes “auto doesn't fill some movies”.
+- **Immersive loading screens.** Clicking a title now opens a cinematic loading experience — poster backdrop with a slow Ken-Burns zoom, ambient amber glow, the LoLTube wordmark, a sweeping progress bar and a live step checklist (site's player → verifying candidates → preparing playback). The mid-play buffering indicator is now a rotating gradient arc with a soft halo that fades in gently (no flash on quick seeks).
+- **WebView fallback player** got the same immersive loading treatment instead of a black screen.
+
+### What was new in v0.8.0
 
 - **True 4K confirmed working on all three sources** (v0.7's real 4K lock: the top rendition is *pinned* the moment you switch the setting — no silent 1080p anymore).
 - **Turbo prefetch REMOVED — it was the buffering.** Long testing on a 25–30 Mbps line showed the parallel 4-worker read-ahead engine caused the stalls on **all three sources** (extra connections + concurrent cache writes fighting the player's own loader). With it gone, vidcore/vidfast/mapple all play 4K without buffering. The passive disk cache + Media3 RAM buffer remain — that combination is what actually sustains 4K.
@@ -70,11 +77,11 @@ The sites' in-browser players use `hls.js` with MSE, small buffers (~8–40 s / 
 
 ## Aspect ratio (the missing setting)
 
-- **Auto (default):** measures the video's real aspect ratio (from the decoder, including anamorphic pixel ratio) and your display's ratio. If they differ by more than ~0.5%, the video is **stretched to fill the screen — zero black bars**. 16:9 content on a 16:9 panel stays pixel-perfect.
+- **Auto (default):** measures the video's real aspect ratio (from the decoder, including anamorphic pixel ratio) and your display's ratio. If they differ by more than ~0.5%, the video is **stretched to fill the screen — zero black bars**. 16:9 content on a 16:9 panel stays pixel-perfect. (v0.9: the fill is now enforced at the *frame* level — the video surface is the full screen and the compositor stretches onto it, so it works for every movie, not just some.)
 - **Fit** — letterbox/pillarbox with black bars
 - **Stretch** — always fill, ignore ratio
-- **Zoom** — fill and crop edges
-- **Manual stretch (v0.8):** vertical + horizontal sliders (100–160%) applied on top of any mode. Use vertical when a movie still shows bars in Auto (the bars are baked into the frame — e.g. a cinemascope film on a 16:9 transfer), horizontal for odd screens/phones.
+- **Zoom** — fill and crop edges (uniform zoom, proportions kept)
+- **Manual stretch (v0.8, fixed v0.9):** vertical + horizontal sliders (100–160%). With any stretch above 100% the player fills the screen first, then stretches further — the excess **crops at the screen edges** (that is what “stretch” means; there is never a “behind the black bars” crop). Use vertical when a movie still shows bars in Auto (bars baked into the frame — e.g. a cinemascope film on a 16:9 transfer), horizontal for odd screens/phones.
 
 Switchable live from the player controls (aspect + stretch buttons, persisted as defaults in Settings).
 
@@ -90,7 +97,7 @@ Switchable live from the player controls (aspect + stretch buttons, persisted as
 2. LoLTube loads the provider's embed page (`vidfast.vc/movie/tt…`, `vidcore.io/…`, `mapple.fun/watch/movie/{tmdb}…`) inside a **hidden, muted WebView** with popups and ad-redirects blocked.
 3. An injected hook (document-start) watches the page's own `XMLHttpRequest`/`fetch`/media-element traffic and captures the real `.m3u8`/`.mpd`/`.mp4` URLs — the page performs all of its own token/crypto work, nothing is forged.
 4. Candidates are verified natively (correct headers, master-playlist detection) and the best one is handed to the native player.
-5. Subtitles come from the provider's token-free `wyzie` endpoint (SRT/VTT), auto-selected in your language; Mapple's `/client-stream` fragment proxy is handled transparently by an OkHttp interceptor.
+5. **Subtitles:** the same hidden page seeds your preferred language into the site's own selector, so the page downloads the subtitle it would pair with *that exact stream copy* — the harvester captures those bytes and playback uses them directly (**site-synced**, correct timeline by construction). Fallback: the provider's token-free `wyzie` listing (SRT/VTT), and embedded manifest tracks. Mapple's `/client-stream` fragment proxy is handled transparently by an OkHttp interceptor.
 
 If every provider fails, you can fall back to **Open in WebView** (the site's own player, popups still blocked).
 
@@ -124,9 +131,20 @@ Requirements: JDK 17, any Android SDK with platform 34. CI signs release APKs wi
 - **Mapple unavailable** — Mapple needs the TMDB id (fetched automatically from Cinemeta) and is pickier about connections; Vidfast/Vidcore are more reliable.
 - **Buffering on old devices** — Settings → Buffer profile → *Balanced*/*Low memory*, and/or cap quality at 1080p (software decode can't keep up with 4K on very old chips).
 - **A source stopped loading** — v0.8's auto-clean resets the WebView profile on every app close; if it happens mid-session, Settings → Storage → *Clear caches now*, then retry.
-- **Subtitles out of sync** — Settings → Subtitle sync (slider, per source), or the player's Sync button (±0.1–5 s steps). Values stick per source.
+- **Subtitles out of sync** — v0.9 arms the *site-synced* subtitle (the file the site pairs with the exact stream copy) with sync 0 — if a title's Subs menu shows no "Site-synced" entry and the fallback subtitle drifts, use Settings → Subtitle sync (slider, per source) or the player's Sync button. Values stick per source.
 - Subtitles don't load — the `wyzie` endpoint sometimes rate-limits; reselect from the Subs menu.
 - **Reporting a playback problem** — copy the diagnostics log (Settings → Diagnostics): it contains the full error chain and stack frames, which pinpoints the exact cause.
+
+## App or website — can a browser do this too?
+
+A browser page **can** play these streams (that's exactly what the sources' own players are — hls.js in a tab), but it **cannot guarantee the app's two core promises**:
+
+- **No locked 4K.** A page has no access to the codec list, decoder selection or `setForceHighestSupportedBitrate` — hls.js ABR decides by its own bandwidth estimate and browser-imposed MSE buffer limits (~12–60 MB total), which is precisely the stutter the sources show in-browser. There is also no way to pin the top rendition from JavaScript reliably.
+- **No Deep-4K RAM buffer.** Browsers cap media buffers hard; the app's 45–120 s time-based buffer (clamped to the device's memory class) does not exist in a tab — a page can't buy RAM with an API.
+- **No transport control.** No 16-per-host connection tuning, no OkHttp interceptor for Mapple's fragment proxy, no keep-alive pool — a page uses whatever the browser gives it.
+- Background tabs get throttled, WebViews get killed, and a phone browser drops to the background codec path the moment you switch apps.
+
+So: **as an app** (Android TV/phone today, the same architecture would map to Windows via a native shell with an embedded MSE-capable player or a LibVLC/MPV core) is the right home for "true locked 4K without buffer". A website makes a fine *companion* catalog, but not the playback engine.
 
 ## Legal
 

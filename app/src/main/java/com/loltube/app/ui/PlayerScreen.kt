@@ -56,11 +56,10 @@ import androidx.compose.material.icons.filled.Timer
 import androidx.compose.material.icons.filled.VolumeOff
 import androidx.compose.material.icons.filled.VolumeUp
 import androidx.compose.material3.Button
-import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.DropdownMenu
-import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
@@ -76,6 +75,8 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
+import com.loltube.app.ui.components.ImmersiveLoading
+import com.loltube.app.ui.components.ModernBuffering
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
@@ -153,6 +154,7 @@ fun PlayerScreen(
     val stretchXPct by vm.stretchXPct.collectAsState()
     val message by vm.message.collectAsState()
     val subs by vm.subs.collectAsState()
+    val siteSyncSubs by vm.siteSubs.collectAsState()
     val embeddedTextTracks by vm.embeddedTextTracks.collectAsState()
     val activeSubLabel by vm.activeSubLabel.collectAsState()
     val audioLanguages by vm.audioLanguages.collectAsState()
@@ -550,13 +552,15 @@ fun PlayerScreen(
                 },
                 update = { pv ->
                     pv.player = player
-                    // The base layout is always FIT (surface exactly matches the
-                    // video aspect); the fill/zoom modes are enforced with an exact
-                    // scale transform on the video surface view itself - that works
-                    // on every device and codec (some codecs ignore the resize-mode
-                    // surface scaling, which is why the old modes did nothing on
-                    // some videos).
-                    pv.resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT
+                    // See applyAspectTransform: whenever the video should COVER
+                    // the screen (FILL / AUTO / ZOOM / manual stretch), the frame
+                    // itself is switched to RESIZE_MODE_FILL so the surface is
+                    // the FULL SCREEN at layout level and the compositor
+                    // stretches the video buffer onto it (hardware, exactly the
+                    // sites' `object-fit: fill`). Transform-only fills stretched
+                    // a letterboxed surface and got cropped at the frame's own
+                    // bounds — which is why horizontal stretch showed the video
+                    // behind left/right black bars.
                     applyAspectTransform(pv, aspectMode, videoSize, screenAspect, stretchYPct, stretchXPct)
                 },
                 modifier = Modifier.fillMaxSize(),
@@ -577,36 +581,31 @@ fun PlayerScreen(
 
         // ---------------- resolving / failed overlays ----------------
         when (val ph = phase) {
-            is PlayerViewModel.Phase.LoadingMeta -> CenterNote("Loading title info…")
+            is PlayerViewModel.Phase.LoadingMeta -> ImmersiveLoading(
+                posterUrl = null,
+                title = null,
+                status = "Loading title info…",
+                modifier = Modifier.fillMaxSize(),
+            )
             is PlayerViewModel.Phase.Resolving -> {
-                Column(
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                    modifier = Modifier.align(Alignment.Center),
-                ) {
-                    CircularProgressIndicator(
-                        color = MaterialTheme.colorScheme.primary,
-                        strokeWidth = 4.dp,
-                        modifier = Modifier.size(52.dp),
-                    )
-                    Spacer(Modifier.height(18.dp))
-                    Text(
-                        "Resolving via ${ph.provider}",
-                        style = MaterialTheme.typography.titleMedium,
-                        fontWeight = FontWeight.Bold,
-                    )
-                    Spacer(Modifier.height(6.dp))
-                    Text(
-                        ph.status,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        textAlign = TextAlign.Center,
-                    )
-                    Text(
-                        "stream hunting runs the site's own player in the background",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.padding(top = 10.dp),
-                    )
+                val steps = listOf(
+                    "Loading the site's player",
+                    "Verifying stream candidates",
+                    "Preparing playback",
+                )
+                val stepIdx = when {
+                    ph.status.contains("Loading player", true) -> 0
+                    ph.status.contains("Verifying", true) -> 1
+                    else -> 1
                 }
+                ImmersiveLoading(
+                    posterUrl = details?.poster,
+                    title = details?.name,
+                    status = "${ph.provider} · ${ph.status}",
+                    stepIndex = stepIdx,
+                    steps = steps,
+                    modifier = Modifier.fillMaxSize(),
+                )
             }
 
             is PlayerViewModel.Phase.Failed -> {
@@ -648,14 +647,10 @@ fun PlayerScreen(
             else -> Unit
         }
 
-        // ---------------- center buffering spinner ----------------
+        // ---------------- center buffering indicator (modern) ----------------
         if (phase is PlayerViewModel.Phase.Ready && buffering) {
-            CircularProgressIndicator(
-                color = MaterialTheme.colorScheme.primary,
-                strokeWidth = 4.dp,
-                modifier = Modifier
-                    .align(Alignment.Center)
-                    .size(56.dp),
+            ModernBuffering(
+                modifier = Modifier.align(Alignment.Center),
             )
         }
 
@@ -960,6 +955,19 @@ fun PlayerScreen(
                         )
                         DropdownMenu(expanded = openMenu == "subs", onDismissRequest = { openMenu = null }) {
                             DropdownMenuItem(text = { Text("Off") }, onClick = { vm.selectSubtitle(null); openMenu = null })
+                            if (siteSyncSubs.isNotEmpty()) {
+                                DropdownMenuItem(
+                                    text = { Text("— Site-synced (matches this stream) —", style = MaterialTheme.typography.labelSmall) },
+                                    onClick = {},
+                                    enabled = false,
+                                )
+                                siteSyncSubs.forEach { s ->
+                                    DropdownMenuItem(
+                                        text = { Text("${if (s.coupled) "Site-synced" else "Site fallback"}  ·  captured" + (if (activeSubLabel?.startsWith("Site") == true) "  ✓" else "")) },
+                                        onClick = { vm.selectSiteSubtitle(s); openMenu = null },
+                                    )
+                                }
+                            }
                             if (embeddedTextTracks.isNotEmpty()) {
                                 DropdownMenuItem(
                                     text = { Text("— From this stream —", style = MaterialTheme.typography.labelSmall) },
@@ -1318,18 +1326,36 @@ private fun fallbackEmbed(request: PlaybackRequest): String? =
     }
 
 /**
- * Enforces the aspect mode by scaling the *video surface view* (not the whole
- * PlayerView, so subtitles stay undistorted). Runs on every recomposition
- * (position ticks every 400ms), so it also follows resolution changes.
+ * Enforces the aspect mode. Two mechanisms, chosen per state:
  *
- *  - AUTO / FILL: non-uniform stretch so the video covers the whole screen
- *    (no black bars anywhere). AUTO leaves near-matching videos untouched.
- *  - ZOOM: uniform scale up + crop (covers, keeps proportions).
- *  - FIT: reset.
- *  - [stretchYPct]/[stretchXPct] (100–160%) are MANUAL multipliers applied on
- *    top of whatever the mode computed — the fix for movies with black bars
- *    burned into the frame (no player can detect those) and for screens that
- *    need sideways stretch.
+ *  - LETTERBOX (FIT / near-matching AUTO, no manual stretch): plain
+ *    RESIZE_MODE_FIT — the frame is sized to the video's aspect and the video
+ *    is centered inside the black shutter. Nothing is transformed.
+ *
+ *  - COVER (FILL / AUTO / ZOOM / any manual stretch): the frame is switched to
+ *    RESIZE_MODE_FILL, so the surface view is the FULL SCREEN at LAYOUT level
+ *    and the compositor stretches the video buffer onto it — hardware-level,
+ *    exactly what the sites do with `object-fit: fill`. Because the surface is
+ *    already the whole screen, there are no letterbox bars for a transform to
+ *    reveal: any extra scaling (ZOOM's crop, the manual stretch multipliers)
+ *    now crops at the SCREEN edges instead of the frame's bounds. That is the
+ *    fix for horizontal stretch leaving left/right black bars over a cropped,
+ *    stretched video (and for "auto doesn't fill some movies").
+ *
+ * Runs on every recomposition (position ticks every 400ms) so it follows
+ * resolution/aspect changes mid-play.
+ *
+ *  - AUTO: cover the whole screen (no bars); near-matching ratios (0.5%) stay
+ *    untouched to avoid a pointless 1.004x distortion.
+ *  - ZOOM: uniform zoom from the full-screen surface — scale only the
+ *    deficient axis by rel (video-space-uniform), cropping that axis at the
+ *    screen edge. Proportions preserved, sides/top slightly cropped.
+ *  - FIT: letterbox. With manual stretch > 100% it upgrades to COVER so the
+ *    stretch starts from a full screen (fill first, then stretch further —
+ *    the excess crops at the screen edges, never "behind" bars).
+ *  - [stretchYPct]/[stretchXPct] (100–160%) are manual multipliers applied on
+ *    top of COVER — for movies with black bars burned into the frame (no
+ *    player can detect those) and for screens that need sideways stretch.
  */
 private fun applyAspectTransform(
     pv: PlayerView,
@@ -1345,39 +1371,41 @@ private fun applyAspectTransform(
         ?.let { (it.width * it.pixelWidthHeightRatio) / it.height }
         ?: (16f / 9f) // sensible default until the size is reported
 
-    var scaleX = 1f
-    var scaleY = 1f
-    when (mode) {
-        AspectMode.FIT -> Unit
+    val rel = videoAspect / screenAspect // >1: video wider than screen
+    val anyManual = stretchYPct > 100 || stretchXPct > 100
 
-        AspectMode.FILL, AspectMode.AUTO -> {
-            val rel = videoAspect / screenAspect // >1: video wider than screen
-            if (rel > 1f) {
-                scaleY = rel
-            } else if (rel < 1f) {
-                scaleX = 1f / rel
-            }
-            // AUTO only skips stretching for truly matching ratios (0.5% —
-            // subtler mismatches like 1.78 vs 1.85 still get filled).
-            if (mode == AspectMode.AUTO && abs(rel - 1f) < 0.005f) {
-                scaleX = 1f; scaleY = 1f
-            }
-        }
+    // pure letterbox: FIT, or AUTO on a matching ratio, with stretch off
+    val letterbox = !anyManual && (
+        mode == AspectMode.FIT ||
+            (mode == AspectMode.AUTO && abs(rel - 1f) < 0.005f)
+        )
 
-        AspectMode.ZOOM -> {
-            val s = maxOf(videoAspect / screenAspect, screenAspect / videoAspect)
-            scaleX = s
-            scaleY = s
-        }
+    pv.resizeMode = if (letterbox) {
+        AspectRatioFrameLayout.RESIZE_MODE_FIT
+    } else {
+        // full-screen surface: the frame itself takes the parent's exact size,
+        // the video buffer is stretched onto it by the compositor
+        AspectRatioFrameLayout.RESIZE_MODE_FILL
     }
 
-    // manual stretch multipliers (100% = no-op)
-    scaleY *= stretchYPct / 100f
-    scaleX *= stretchXPct / 100f
+    var sx = 1f
+    var sy = 1f
+    if (!letterbox) {
+        if (mode == AspectMode.ZOOM) {
+            // uniform zoom off the full-screen surface: scale only the deficient
+            // axis — the video stays proportioned and the excess crops at the
+            // screen edge (wide video -> sides crop; narrow video -> top/bottom)
+            if (rel > 1f) sx = rel else if (rel < 1f) sy = 1f / rel
+        }
+        // FILL / AUTO: the full-screen surface already covers everything.
+        // manual multipliers on top (excess crops at the screen edges)
+        sx *= stretchXPct / 100f
+        sy *= stretchYPct / 100f
+    }
 
     val target = runCatching { pv.videoSurfaceView }.getOrNull() ?: pv
-    target.scaleX = scaleX
-    target.scaleY = scaleY
+    target.scaleX = sx
+    target.scaleY = sy
 }
 
 @Composable

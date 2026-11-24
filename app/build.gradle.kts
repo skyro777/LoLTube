@@ -13,8 +13,8 @@ android {
         applicationId = "com.loltube.app"
         minSdk = 28 // Android 9 (many TVs still ship with it)
         targetSdk = 34
-        versionCode = 8
-        versionName = "0.8.0"
+        versionCode = 9
+        versionName = "0.9.0"
     }
 
     val ksFile = rootProject.file("keystore/loltube-release.p12")
