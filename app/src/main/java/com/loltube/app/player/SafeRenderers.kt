@@ -50,7 +50,7 @@ object SafeRenderers {
 }
 
 @UnstableApi
-internal class CrashSafeRenderersFactory(context: Context) : DefaultRenderersFactory(context) {
+class CrashSafeRenderersFactory(context: Context) : DefaultRenderersFactory(context) {
 
     override fun buildVideoRenderers(
         context: Context,
@@ -88,7 +88,7 @@ internal class CrashSafeRenderersFactory(context: Context) : DefaultRenderersFac
  * recovery ladder will rebuild the player anyway).
  */
 @UnstableApi
-internal class SafeMediaCodecVideoRenderer(
+class SafeMediaCodecVideoRenderer(
     context: Context,
     mediaCodecSelector: MediaCodecSelector,
     allowedJoiningTimeMs: Long,
