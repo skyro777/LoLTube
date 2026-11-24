@@ -1,26 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Android TV launcher banner (320x180dp) -->
+<!-- TV launcher banner (320x220dp): dark plate with the logo centered. -->
 <layer-list xmlns:android="http://schemas.android.com/apk/res/android">
-    <item>
-        <shape android:shape="rectangle">
-            <solid android:color="@color/tv_banner_bg" />
-        </shape>
-    </item>
-    <item android:left="24dp" android:top="55dp" android:right="212dp" android:bottom="55dp">
-        <shape android:shape="rectangle">
-            <corners android:radius="12dp" />
-            <solid android:color="#FFB300" />
-        </shape>
-    </item>
-    <item android:left="44dp" android:top="65dp" android:right="222dp" android:bottom="65dp">
-        <shape android:shape="oval">
-            <solid android:color="#0E0E12" />
-        </shape>
-    </item>
-    <item android:left="128dp" android:top="76dp" android:right="60dp" android:bottom="76dp">
-        <shape android:shape="rectangle">
-            <corners android:radius="8dp" />
-            <solid android:color="#FFB300" />
-        </shape>
-    </item>
+    <item android:drawable="@color/tv_banner_bg" />
+    <item
+        android:drawable="@drawable/tv_banner_icon"
+        android:gravity="center"
+        android:width="140dp"
+        android:height="140dp" />
 </layer-list>
