@@ -26,6 +26,7 @@ class StreamResolver(private val context: Context) {
     suspend fun resolve(
         request: PlaybackRequest,
         order: List<ProviderId>,
+        prefSubLang: String = "en",
         onStatus: suspend (ProviderId, String) -> Unit = { _, _ -> },
     ): Pair<ResolvedStream?, List<Attempt>> {
         val attempts = mutableListOf<Attempt>()
@@ -40,7 +41,7 @@ class StreamResolver(private val context: Context) {
 
             val harvester = WebViewHarvester(context)
             val harvest = try {
-                harvester.harvest(embed)
+                harvester.harvest(embed, prefSubLang)
             } catch (t: Throwable) {
                 AppLog.e("Resolver", "${id.label} harvest crashed: ${t.message}")
                 attempts.add(Attempt(id, "Harvester error: ${t.message}"))
@@ -68,6 +69,7 @@ class StreamResolver(private val context: Context) {
                 headers = headers,
                 allCandidates = candidates,
                 subs = harvest.subs,
+                siteSubs = harvest.siteSubs,
             ) to attempts
         }
         return null to attempts

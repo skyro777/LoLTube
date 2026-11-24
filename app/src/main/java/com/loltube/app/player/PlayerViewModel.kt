@@ -117,6 +117,12 @@ class PlayerViewModel(
     private val _subs = MutableStateFlow<List<Wyzie.Sub>>(emptyList())
     val subs: StateFlow<List<Wyzie.Sub>> = _subs.asStateFlow()
 
+    /** Subtitle files the site's own page downloaded while we harvested —
+     *  stream-coupled (matched to the exact video copy being served, which is
+     *  why their timeline is right by construction). */
+    private val _siteSubs = MutableStateFlow<List<com.loltube.app.providers.SiteSubtitle>>(emptyList())
+    val siteSubs: StateFlow<List<com.loltube.app.providers.SiteSubtitle>> = _siteSubs.asStateFlow()
+
     private val _embeddedTextTracks = MutableStateFlow<List<EmbeddedTextTrack>>(emptyList())
     val embeddedTextTracks: StateFlow<List<EmbeddedTextTrack>> = _embeddedTextTracks.asStateFlow()
 
@@ -557,14 +563,25 @@ class PlayerViewModel(
      * Download the preferred subtitle BEFORE the first prepare so it ships with
      * the initial MediaItem — subtitles appear immediately and nothing has to
      * be restarted later. Bounded to 4s: a slow subtitle host must never delay
-     * the video. The preferred source is the SITE's own listing
-     * ([providerSubs], captured from the page's /wyzie call); the direct API
-     * ([_subs], filled by the fallback) is only used when that was empty.
+     * the video. Priority order:
+     *  1. the SITE-SYNCED file the page downloaded itself (captured body — the
+     *     exact bytes the site pairs with the stream copy it served; the timeline
+     *     is correct by construction),
+     *  2. the site's own listing ([providerSubs], captured from the page's
+     *     /wyzie call) — matched to the IMDb id, i.e. the site's fallback tier,
+     *  3. the direct API fallback ([_subs]).
      */
     private suspend fun preAttachSubtitle() {
         if (!settings.subtitlesEnabled) return
         if (userTurnedSubsOff) return
         if (sidecarCues.isNotEmpty()) return
+
+        val synced = _siteSubs.value
+        if (synced.isNotEmpty()) {
+            val coupled = synced.filter { it.coupled }.ifEmpty { synced }
+            if (armSiteSubtitle(coupled.first())) return
+        }
+
         val pool = providerSubs.ifEmpty { _subs.value }
         if (pool.isEmpty()) return // nothing to pick from yet; a later listing can still attach
 
@@ -576,6 +593,45 @@ class PlayerViewModel(
             }
             ?: return
         attachSubtitleCues(pick)
+    }
+
+    /**
+     * Arm a subtitle the SITE ITSELF downloaded for its auto-selected track.
+     * The body was captured verbatim during the harvest, so there is nothing
+     * to re-download — and because the site pairs this file with the exact
+     * stream copy it is serving, the cue timeline matches the video by
+     * construction (the /wyzie listing can differ by cut/release and drift
+     * anywhere from seconds to minutes — that was the "subtitles at any
+     * timeline" bug). The sync offset resets to 0 for these; manual nudges
+     * still work on top.
+     */
+    private fun armSiteSubtitle(sub: com.loltube.app.providers.SiteSubtitle): Boolean {
+        val cues = runCatching { Subtitles.parse(sub.body) }.getOrDefault(emptyList())
+        if (cues.isEmpty()) {
+            AppLog.d("Subs", "site-synced body parsed 0 cues — skipping")
+            return false
+        }
+        sidecarSub = null
+        sidecarCues = cues
+        desiredSubLang = settings.preferredSubtitleLang
+        userTurnedSubsOff = false
+        _activeSubLabel.value = if (sub.coupled) "Site-synced" else "Site fallback"
+        // site-synced = perfect timeline for THIS copy — never inherit the
+        // per-provider offset that was calibrated for a different subtitle file
+        _subDelayMs.value = 0
+        disableAllTextTracks(player.value)
+        AppLog.d(
+            "Subs",
+            "SITE-SYNCED subtitle armed (captured body, ${cues.size} cues, sync=0) <- ${sub.url.take(90)}",
+        )
+        return true
+    }
+
+    /** Menu pick of a site-synced capture (instant — body already in memory). */
+    fun selectSiteSubtitle(sub: com.loltube.app.providers.SiteSubtitle) {
+        if (!armSiteSubtitle(sub)) {
+            _message.value = "Couldn't parse the site-synced subtitle"
+        }
     }
 
     /** Download, parse and arm a subtitle for the overlay. Returns success. */
@@ -670,7 +726,7 @@ class PlayerViewModel(
             _phase.value = Phase.Resolving((forceOrder?.first() ?: providerChoice)?.label ?: "Auto", "Starting…")
             val order = forceOrder ?: providerChoice?.let { listOf(it) } ?: settings.providerOrder
 
-            val (stream, attempts) = resolver.resolve(req, order) { id, status ->
+            val (stream, attempts) = resolver.resolve(req, order, settings.preferredSubtitleLang) { id, status ->
                 _phase.value = Phase.Resolving(id.label, status)
             }
 
@@ -686,6 +742,7 @@ class PlayerViewModel(
             currentStream = stream
             currentRequest = req
             providerSubs = stream.subs
+            _siteSubs.value = stream.siteSubs
             if (providerSubs.isNotEmpty()) mergeSubs(emptyList())
 
             // Site-native subtitle listing came back empty (mapple, or a page
@@ -719,9 +776,14 @@ class PlayerViewModel(
 
             // Re-arm the subtitle auto-attach for the NEW stream: the sticky
             // language (or the previously parsed sidecar of the same title)
-            // carries over — subtitles stay ON across source switches, only
-            // the per-source sync delay changes.
+            // carries over — subtitles stay ON across source switches. The
+            // SITE-SYNCED capture of the new stream wins over the carried-over
+            // sidecar (it matches the new copy exactly).
             embeddedAutoTried = false
+            if (stream.siteSubs.isNotEmpty()) {
+                sidecarSub = null
+                sidecarCues = emptyList()
+            }
             _subDelayMs.value = settings.subDelayByProvider[stream.provider] ?: 0
             if (sidecarCues.isEmpty()) {
                 kotlinx.coroutines.withTimeoutOrNull(4_000) { preAttachSubtitle() }

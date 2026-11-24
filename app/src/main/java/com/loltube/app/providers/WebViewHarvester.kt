@@ -38,16 +38,31 @@ import java.util.concurrent.CopyOnWriteArrayList
  * The WebView is muted, popups are blocked, and cross-origin navigations
  * (popunder ad redirects) are cancelled.
  */
-/** Result of one harvest run: playable stream candidates + subtitle listing. */
+/** A subtitle file the site's own player ACTUALLY DOWNLOADED while we harvested.
+ *  These are the files the site pairs with the exact video copy it serves
+ *  (vidfast/vidcore decrypt the track list inside the page and fetch the
+ *  auto-selected one; mapple auto-selects from its own action) - i.e. they are
+ *  STREAM-COUPLED, unlike the /wyzie listing which is matched to the IMDb id
+ *  only. `coupled` is false when the URL is a /wyzie fallback download. */
+data class SiteSubtitle(
+    val url: String,
+    val body: String,
+    val coupled: Boolean,
+)
+
+/** Result of one harvest run: playable stream candidates + subtitle listing +
+ *  the site-synced subtitle bodies captured off the page's own downloads. */
 data class HarvestResult(
     val candidates: List<StreamCandidate>,
     val subs: List<Wyzie.Sub>,
+    val siteSubs: List<SiteSubtitle> = emptyList(),
 )
 
 @SuppressLint("SetJavaScriptEnabled", "JavascriptInterface")
 class WebViewHarvester(private val context: Context) {
 
     private val candidates = CopyOnWriteArrayList<StreamCandidate>()
+    private val siteSubs = CopyOnWriteArrayList<SiteSubtitle>()
     @Volatile private var lastActivityMs: Long = 0
     @Volatile private var sawFragment = false
     @Volatile private var sawPlaying = false
@@ -79,16 +94,37 @@ class WebViewHarvester(private val context: Context) {
                 AppLog.d("Harvest", "page reports playback started")
             }
         }
+
+        /** The page downloaded something that parses as a subtitle file. This is
+         *  the SITE-SYNCED subtitle (matched to the exact stream copy) — the
+         *  body is kept verbatim so playback never has to re-download it. */
+        @JavascriptInterface
+        fun onSiteSubtitle(url: String, body: String) {
+            if (body.length < 150 || body.length > 1_500_000) return
+            if (!body.contains("-->")) return
+            if (body.split("-->").size < 3) return // one stray arrow is not a subtitle
+            if (siteSubs.any { it.url == url }) return
+            val coupled = !url.contains("/wyzie")
+            siteSubs.add(SiteSubtitle(url, body, coupled))
+            lastActivityMs = now()
+            AppLog.d(
+                "Harvest",
+                "captured subtitle body ${body.length}b ${if (coupled) "STREAM-COUPLED" else "generic"} <- ${url.take(90)}",
+            )
+        }
     }
 
     /**
      * Loads [url] and waits until a video manifest is very likely captured.
-     * Returns the stream candidates plus any subtitle listing the page itself
-     * requested (captured via the request interceptor - immune to API-level
-     * or Cloudflare changes on the /wyzie endpoint).
+     * Returns the stream candidates, the subtitle listing the page itself
+     * requested (via the /wyzie proxy), and — the important one — the subtitle
+     * FILE the page actually downloaded for its auto-selected language track.
+     * [prefSubLang] seeds the page's stored language so the site auto-selects
+     * (and downloads) the track it would pair with THIS stream copy.
      */
-    suspend fun harvest(url: String, timeoutMs: Long = 45_000): HarvestResult {
+    suspend fun harvest(url: String, prefSubLang: String = "en", timeoutMs: Long = 45_000): HarvestResult {
         candidates.clear()
+        siteSubs.clear()
         sawFragment = false
         sawPlaying = false
         lastActivityMs = 0
@@ -98,7 +134,7 @@ class WebViewHarvester(private val context: Context) {
         return withContext(Dispatchers.Main) {
             var wv: WebView? = null
             try {
-                wv = createWebView(url)
+                wv = createWebView(url, prefSubLang)
                 webViewRef = wv
                 val start = now()
                 var lastCandidateCount = 0
@@ -117,16 +153,24 @@ class WebViewHarvester(private val context: Context) {
                         if (earlyExit) break
                     }
                 }
-                // grace period: let variant playlists / fragments land
+                // grace period: let variant playlists / fragments land, and give
+                // the page's auto-selected subtitle download a bounded window —
+                // the site fetches it right around manifest time, and that file
+                // is the stream-coupled subtitle we want to carry into playback.
+                val subDeadline = now() + 4_000
                 repeat(8) {
                     ensureActive()
                     delay(250)
                 }
-                HarvestResult(candidates.toList(), capturedSubs)
+                while (now() < subDeadline && siteSubs.isEmpty()) {
+                    ensureActive()
+                    delay(250)
+                }
+                HarvestResult(candidates.toList(), capturedSubs, siteSubs.toList())
             } catch (t: Throwable) {
                 if (t is kotlinx.coroutines.CancellationException) throw t
                 AppLog.e("Harvest", "failed: ${t.message}")
-                HarvestResult(candidates.toList(), capturedSubs)
+                HarvestResult(candidates.toList(), capturedSubs, siteSubs.toList())
             } finally {
                 destroyWebView()
             }
@@ -134,7 +178,7 @@ class WebViewHarvester(private val context: Context) {
     }
 
     @SuppressLint("SetJavaScriptEnabled")
-    private fun createWebView(url: String): WebView = WebView(context).apply {
+    private fun createWebView(url: String, prefSubLang: String): WebView = WebView(context).apply {
         settings.apply {
             javaScriptEnabled = true
             domStorageEnabled = true
@@ -203,12 +247,12 @@ class WebViewHarvester(private val context: Context) {
             override fun onPageStarted(view: WebView, url: String, favicon: Bitmap?) {
                 super.onPageStarted(view, url, favicon)
                 // fallback injection (in case document-start API is unavailable)
-                view.evaluateJavascript(HOOK_JS, null)
+                view.evaluateJavascript(currentHookJs, null)
             }
 
             override fun onPageFinished(view: WebView, url: String) {
                 super.onPageFinished(view, url)
-                view.evaluateJavascript(HOOK_JS, null)
+                view.evaluateJavascript(currentHookJs, null)
                 // nudge playback so hls.js starts pulling manifests/fragments
                 view.evaluateJavascript(
                     "document.querySelectorAll('video').forEach(function(v){v.muted=true;v.volume=0;var p=v.play();if(p&&p.catch)p.catch(function(){});});",
@@ -235,12 +279,13 @@ class WebViewHarvester(private val context: Context) {
         // document-start hook injection (best effort)
         try {
             if (WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)) {
-                WebViewCompat.addDocumentStartJavaScript(this, HOOK_JS, setOf("*"))
+                WebViewCompat.addDocumentStartJavaScript(this, hookJs(prefSubLang), setOf("*"))
             }
         } catch (t: Throwable) {
             AppLog.d("Harvest", "document-start injection unavailable: ${t.message}")
         }
 
+        currentHookJs = hookJs(prefSubLang)
         loadUrl(url)
     }
 
@@ -256,6 +301,8 @@ class WebViewHarvester(private val context: Context) {
             AppLog.d("Harvest", "destroy: ${t.message}")
         }
     }
+
+    @Volatile private var currentHookJs: String = ""
 
     private fun now() = android.os.SystemClock.elapsedRealtime()
 
@@ -287,11 +334,20 @@ class WebViewHarvester(private val context: Context) {
             return JUNK_HOST_SUFFIXES.any { host == it || host.endsWith(".$it") }
         }
 
-        /** Injected at document start; watches the page's media traffic. */
-        private val HOOK_JS = """
+        /** Injected at document start; watches the page's media traffic AND
+         *  captures the subtitle file the page itself downloads (the
+         *  stream-coupled one), plus seeds the page's stored language so the
+         *  site auto-selects the subtitle it would pair with this exact stream
+         *  copy (vidfast/vidcore read localStorage "language" for auto-select). */
+        private fun hookJs(prefLang: String): String = """
             (function(){
               if (window.__loltube_hooked) return;
               window.__loltube_hooked = true;
+              try {
+                if (window.localStorage) {
+                  localStorage.setItem('language', '__LANG__');
+                }
+              } catch(e) {}
               function send(url, kind){
                 try { __loltube.onCandidate(url, kind); } catch(e) {}
               }
@@ -318,11 +374,41 @@ class WebViewHarvester(private val context: Context) {
               if (window.fetch) {
                 var ff = window.fetch;
                 window.fetch = function(input, init){
+                  var u = '';
                   try {
-                    var u = (typeof input === 'string') ? input : (input && input.url) ? input.url : '';
-                    var k = classify(u); if (k) send(u, k);
-                  } catch(e){}
-                  return ff.apply(this, arguments);
+                    u = (typeof input === 'string') ? input : (input && input.url) ? input.url : '';
+                  } catch(e) {}
+                  var k = classify(u); if (k) send(u, k);
+                  var pr = ff.apply(this, arguments);
+                  try {
+                    if (u && /^https?:/i.test(u) && classify(u) === null && u.indexOf('/wyzie?') === -1) {
+                      pr.then(function(resp){
+                        try {
+                          if (!resp || !resp.ok || !resp.clone) return;
+                          var ct = '';
+                          try { ct = (resp.headers && resp.headers.get('content-type')) || ''; } catch(e2) {}
+                          var len = 0;
+                          try { len = parseInt(resp.headers.get('content-length') || '0', 10) || 0; } catch(e2) {}
+                          if (len > 3000000) return;
+                          if (/^(video|audio|image|font)\//i.test(ct)) return;
+                          var looksSub = /text\//i.test(ct) ||
+                                         /octet-stream|subrip|x-subrip|force-download/i.test(ct) ||
+                                         /\.(vtt|srt|ssa|ass)(\?|#|$)/i.test(u);
+                          if (looksSub) {
+                            resp.clone().text().then(function(t){
+                              try {
+                                if (t && t.length > 150 && t.length < 2000000 &&
+                                    t.indexOf('-->') > 0 && t.split('-->').length >= 3) {
+                                  __loltube.onSiteSubtitle(u, t);
+                                }
+                              } catch(e3) {}
+                            }).catch(function(){});
+                          }
+                        } catch(e2) {}
+                      }).catch(function(){});
+                    }
+                  } catch(e) {}
+                  return pr;
                 };
               }
               try {
@@ -344,6 +430,6 @@ class WebViewHarvester(private val context: Context) {
                 }, true);
               } catch(e){}
             })();
-        """.trimIndent()
+        """.trimIndent().replace("__LANG__", prefLang.take(8).replace("'", ""))
     }
 }

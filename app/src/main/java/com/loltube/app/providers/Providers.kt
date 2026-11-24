@@ -31,6 +31,9 @@ data class ResolvedStream(
     val allCandidates: List<StreamCandidate> = emptyList(),
     /** Subtitles the provider page itself listed (captured during the harvest). */
     val subs: List<com.loltube.app.data.Wyzie.Sub> = emptyList(),
+    /** Subtitle files the page actually DOWNLOADED for its auto-selected track —
+     *  stream-coupled (the site pairs them with the exact copy it serves). */
+    val siteSubs: List<SiteSubtitle> = emptyList(),
 )
 
 object Providers {
