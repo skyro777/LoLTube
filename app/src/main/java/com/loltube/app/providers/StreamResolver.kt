@@ -123,9 +123,9 @@ class MappleStreamInterceptor : Interceptor {
          * master-playlist resolution capping.
          *
          * @param parallel raises per-host concurrency to 16 with a 16-connection
-         * pool: the player's own loader plus the 4 prefetch workers must be able
-         * to fetch 4K segments from the same CDN host at the same time (OkHttp's
-         * default 5-per-host limit serializes them and starves the flywheel).
+         * pool so the player's loader can always fetch big 4K segments without
+         * queuing behind other requests on the same CDN host (OkHttp's default
+         * 5-per-host limit serializes them and starves throughput).
          *
          * Long read timeout: 4K segments are big and some CDN nodes are slow —
          * a short timeout kills in-flight segment loads and surfaces as a

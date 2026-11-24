@@ -9,7 +9,6 @@ import androidx.media3.datasource.DefaultDataSource
 import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
-import androidx.media3.exoplayer.mediacodec.MediaCodecInfo
 import androidx.media3.exoplayer.mediacodec.MediaCodecSelector
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.exoplayer.trackselection.AdaptiveTrackSelection
@@ -25,22 +24,22 @@ import com.loltube.app.util.AppLog
  * Builds ExoPlayer instances tuned for stall-free playback:
  *  - ABR that can actually DOWN-switch quickly (locking ABR off once the buffer
  *    was full is what rebuffered forever on slow lines);
- *  - an up-to-800 MB on-disk segment cache + [TurboPrefetcher] 4-worker
- *    parallel read-ahead (the real "no buffering" engine — see [PlaybackCache]);
+ *  - an up-to-800 MB on-disk segment cache every player byte flows through
+ *    (seek-backs and replays become disk reads); the old 4-worker parallel
+ *    prefetcher was removed in v0.8.0 — it stalled all three sources;
  *  - large time buffers with a memory-aware byte budget (the default ~131 MB
  *    byte cap silently truncated the 4K buffer; asking for more than the device
  *    has RAM for does the opposite);
  *  - a crash-proof data pipeline: every byte flows through [SafeDataSource],
- *    which converts any runtime-exception race (cache/OkHttp/prefetch
- *    collisions — the source of ERROR_CODE_FAILED_RUNTIME_CHECK) into a
- *    retriable network error instead of a fatal one;
+ *    which converts any runtime-exception race (cache/OkHttp collisions — the
+ *    source of ERROR_CODE_FAILED_RUNTIME_CHECK) into a retriable network error
+ *    instead of a fatal one;
  *  - a crash-proof renderer layer ([SafeRenderers]): the codec-surface switch
  *    bug on vendor TV-box decoders (media3 #1641/#2529/#3011) and any codec
  *    query failure are survived instead of killing the stream with
  *    ERROR_CODE_FAILED_RUNTIME_CHECK; software decoders stay available as
  *    real fallback (the old hardware-only filter removed them);
- *  - OkHttp transport with keep-alive pooling and 16 requests per host so the
- *    player + 4 prefetch workers can fetch segments concurrently.
+ *  - OkHttp transport with keep-alive pooling.
  */
 @UnstableApi
 object PlayerEngine {
@@ -60,21 +59,18 @@ object PlayerEngine {
     private const val ABR_BANDWIDTH_FRACTION = 0.55f
 
     /** A player plus the resources that must be released with it. */
-    data class Built(val player: ExoPlayer, val prefetcher: TurboPrefetcher?)
+    data class Built(val player: ExoPlayer)
 
     /**
-     * @param safeMode rebuild without disk cache and prefetch — used by the
-     * self-healing recovery ladder after repeated failures. Identical to the
-     * v0.2 pipeline that always played, so even a total cache failure can only
-     * degrade throughput, never playback itself.
+     * @param safeMode rebuild without disk cache — used by the self-healing
+     * recovery ladder after repeated failures. Identical to the v0.2 pipeline
+     * that always played, so even a total cache failure can only degrade
+     * throughput, never playback itself.
      */
     fun build(
         context: Context,
         settings: AppSettings,
         streamHeaders: Map<String, String>,
-        prefetchEnabled: () -> Boolean = { true },
-        bufferAheadMs: () -> Long = { 0L },
-        positionMs: () -> Long = { 0L },
         safeMode: Boolean = false,
     ): Built {
         val profile = settings.bufferProfile
@@ -123,11 +119,10 @@ object PlayerEngine {
             DefaultMediaSourceFactory(DefaultDataSource.Factory(context, httpFactory))
         } else {
             // Every byte the player reads (manifests + segments) flows through the
-            // disk cache AND the crash-proof wrapper. TurboPrefetcher fills the
-            // cache ahead of the playhead. DefaultDataSource in front routes by
-            // scheme: http(s) -> cache/OkHttp pipeline, file:// -> FileDataSource
-            // (subtitle sidecars!), content:// -> ContentDataSource. This is what
-            // finally makes subtitles load instead of killing the stream.
+            // disk cache AND the crash-proof wrapper. DefaultDataSource in front
+            // routes by scheme: http(s) -> cache/OkHttp pipeline, file:// ->
+            // FileDataSource (subtitle sidecars!), content:// -> ContentDataSource.
+            // This is what finally makes subtitles load instead of killing the stream.
             val cache = PlaybackCache.get(context)
             val cacheFactory = androidx.media3.datasource.cache.CacheDataSource.Factory()
                 .setCache(cache)
@@ -175,26 +170,8 @@ object PlayerEngine {
                 .build()
         }
 
-        val prefetcher: TurboPrefetcher? = if (safeMode) {
-            null
-        } else {
-            val cache = PlaybackCache.get(context)
-            TurboPrefetcher(
-                cache = cache,
-                cacheDataSourceFactory = androidx.media3.datasource.cache.CacheDataSource.Factory()
-                    .setCache(cache)
-                    .setUpstreamDataSourceFactory(httpFactory)
-                    .setFlags(
-                        androidx.media3.datasource.cache.CacheDataSource.FLAG_IGNORE_CACHE_ON_ERROR
-                    ),
-                enabled = prefetchEnabled,
-                bufferAheadMs = bufferAheadMs,
-                positionMs = positionMs,
-            ).also { player.addAnalyticsListener(it) }
-        }
-
         applyQualityMode(player, settings.quality)
-        return Built(player, prefetcher)
+        return Built(player)
     }
 
     /**

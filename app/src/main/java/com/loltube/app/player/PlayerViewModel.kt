@@ -102,6 +102,15 @@ class PlayerViewModel(
     private val _aspectMode = MutableStateFlow(AspectMode.AUTO)
     val aspectMode: StateFlow<AspectMode> = _aspectMode.asStateFlow()
 
+    /** Manual stretch multipliers on top of the aspect mode (100% = off).
+     *  Vertical fixes movies with black bars baked into the frame (auto can
+     *  not detect those); horizontal fixes odd screens/phones. */
+    private val _stretchYPct = MutableStateFlow(100)
+    val stretchYPct: StateFlow<Int> = _stretchYPct.asStateFlow()
+
+    private val _stretchXPct = MutableStateFlow(100)
+    val stretchXPct: StateFlow<Int> = _stretchXPct.asStateFlow()
+
     private val _message = MutableStateFlow<String?>(null)
     val message: StateFlow<String?> = _message.asStateFlow()
 
@@ -162,7 +171,6 @@ class PlayerViewModel(
     @Volatile private var userTurnedSubsOff = false
 
     private var providerSubs: List<com.loltube.app.data.Wyzie.Sub> = emptyList()
-    private var prefetcher: TurboPrefetcher? = null
 
     // stall watchdog state
     @Volatile private var bufferingSinceMs = 0L
@@ -355,7 +363,7 @@ class PlayerViewModel(
                 }
 
                 recoveryStage <= 3 -> {
-                    // fail-safe pipeline: no cache, no prefetch, plain network
+                    // fail-safe pipeline: no cache, plain network
                     recoveryStage = 4
                     sessionDecoderCap = 720
                     _message.value = "Rebuilding player (fail-safe mode)…"
@@ -495,6 +503,8 @@ class PlayerViewModel(
             settings = SettingsStore.read(context)
             _qualityMode.value = settings.quality
             _aspectMode.value = settings.aspect
+            _stretchYPct.value = settings.stretchYPct
+            _stretchXPct.value = settings.stretchXPct
             _subStyle.value = SubStyle(
                 sizePct = settings.subtitleSize.pct,
                 color = settings.subtitleColor,
@@ -723,14 +733,10 @@ class PlayerViewModel(
                     context = context,
                     settings = settings,
                     streamHeaders = stream.headers,
-                    prefetchEnabled = { settings.turboPrefetch },
-                    bufferAheadMs = { (_bufferedMs.value - _positionMs.value).coerceAtLeast(0) },
-                    positionMs = { _positionMs.value },
                 ).let { built ->
                     built.player.addListener(playerListener)
                     built.player.addAnalyticsListener(analyticsListener)
                     _player.value = built.player
-                    prefetcher = built.prefetcher
                     startLoops()
                     built.player
                 }
@@ -771,14 +777,12 @@ class PlayerViewModel(
      *
      * @param capHeight decoder-safety ceiling for the rebuild (null = keep
      * whatever quality is currently allowed)
-     * @param safeMode fail-safe pipeline: no disk cache, no prefetch, direct
-     * network — for repeated failures
+     * @param safeMode fail-safe pipeline: no disk cache, direct network — for
+     * repeated failures
      */
     private fun rebuildAtPosition(capHeight: Int?, safeMode: Boolean) {
         val stream = currentStream ?: return
         val pos = _positionMs.value
-        prefetcher?.stop()
-        prefetcher = null
         player.value?.let {
             runCatching {
                 it.removeListener(playerListener)
@@ -792,15 +796,11 @@ class PlayerViewModel(
             context = context,
             settings = settings,
             streamHeaders = stream.headers,
-            prefetchEnabled = { settings.turboPrefetch },
-            bufferAheadMs = { (_bufferedMs.value - _positionMs.value).coerceAtLeast(0) },
-            positionMs = { _positionMs.value },
             safeMode = safeMode,
         )
         built.player.addListener(playerListener)
         built.player.addAnalyticsListener(analyticsListener)
         _player.value = built.player
-        prefetcher = built.prefetcher
         PlayerEngine.applyQualityMode(built.player, _qualityMode.value, sessionDecoderCap ?: capHeight)
 
         val mediaItem = PlayerEngine.buildMediaItem(stream.url, stream.kind, null)
@@ -1002,6 +1002,33 @@ class PlayerViewModel(
     }
 
     /**
+     * Manual stretch on top of the aspect mode, in % (100 = off).
+     * [vertical] = top-bottom stretch (removes bars baked INTO the video —
+     * auto-fill can't detect those); horizontal = left-right stretch (odd
+     * screens/phones). Persisted, applied instantly (pure view transform).
+     */
+    fun nudgeStretch(vertical: Boolean, deltaPct: Int) {
+        if (vertical) {
+            _stretchYPct.value = (_stretchYPct.value + deltaPct).coerceIn(100, 160)
+            viewModelScope.launch { SettingsStore.setStretchY(context, _stretchYPct.value) }
+        } else {
+            _stretchXPct.value = (_stretchXPct.value + deltaPct).coerceIn(100, 160)
+            viewModelScope.launch { SettingsStore.setStretchX(context, _stretchXPct.value) }
+        }
+        AppLog.d("Stretch", (if (vertical) "vertical" else "horizontal") + " -> ${if (vertical) _stretchYPct.value else _stretchXPct.value}%")
+    }
+
+    fun resetStretch() {
+        _stretchYPct.value = 100
+        _stretchXPct.value = 100
+        viewModelScope.launch {
+            SettingsStore.setStretchY(context, 100)
+            SettingsStore.setStretchX(context, 100)
+        }
+        AppLog.d("Stretch", "manual stretch reset")
+    }
+
+    /**
      * Pick a downloaded sidecar subtitle from the menu. Instant: the overlay
      * simply switches its cue list — the video stream is never restarted
      * (the old implementation re-prepared the media item for this).
@@ -1050,10 +1077,15 @@ class PlayerViewModel(
      * earlier. Applied instantly — a pure display-side shift, exactly like
      * the sites' own timing adjusters (mapple's timingAdjustment, vidfast's
      * subtitle offset) — and persisted PER PROVIDER, because each source's
-     * video copy is trimmed differently (2–6s drift depending on source).
+     * video copy is trimmed differently (up to a minute of drift is possible).
      */
     fun nudgeSubDelay(deltaMs: Int) {
-        val next = (_subDelayMs.value + deltaMs).coerceIn(-30_000, 30_000)
+        setSubDelay(_subDelayMs.value + deltaMs)
+    }
+
+    /** Direct set (the ±60s slider) — same instant + per-provider persistence. */
+    fun setSubDelay(ms: Int) {
+        val next = ms.coerceIn(-60_000, 60_000)
         _subDelayMs.value = next
         _cueText.value = Subtitles.activeCueAt(sidecarCues, _positionMs.value, next)?.text
         val provider = currentStream?.provider ?: return
@@ -1069,7 +1101,7 @@ class PlayerViewModel(
         AppLog.d("Subs", "sync delay for ${provider.label} -> reset")
     }
 
-    /** Re-read settings (subtitle appearance may have changed in Settings). */
+    /** Re-read settings (subtitle appearance / stretch / sync may have changed). */
     fun refreshSubStyle() {
         viewModelScope.launch {
             settings = SettingsStore.read(context)
@@ -1078,6 +1110,8 @@ class PlayerViewModel(
                 color = settings.subtitleColor,
                 bgPct = settings.subtitleBgPct,
             )
+            _stretchYPct.value = settings.stretchYPct
+            _stretchXPct.value = settings.stretchXPct
             currentStream?.let {
                 _subDelayMs.value = settings.subDelayByProvider[it.provider] ?: 0
             }
@@ -1189,8 +1223,6 @@ class PlayerViewModel(
     }
 
     private fun releasePlayer() {
-        prefetcher?.stop()
-        prefetcher = null
         player.value?.let {
             it.removeListener(playerListener)
             it.removeAnalyticsListener(analyticsListener)

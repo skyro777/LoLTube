@@ -45,6 +45,7 @@ import androidx.compose.material.icons.filled.Bolt
 import androidx.compose.material.icons.filled.Brightness7
 import androidx.compose.material.icons.filled.FastForward
 import androidx.compose.material.icons.filled.FastRewind
+import androidx.compose.material.icons.filled.OpenInFull
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.PlaylistPlay
@@ -81,7 +82,6 @@ import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.nativeKeyCode
@@ -149,6 +149,8 @@ fun PlayerScreen(
     val videoSize by vm.videoSize.collectAsState()
     val qualityMode by vm.qualityMode.collectAsState()
     val aspectMode by vm.aspectMode.collectAsState()
+    val stretchYPct by vm.stretchYPct.collectAsState()
+    val stretchXPct by vm.stretchXPct.collectAsState()
     val message by vm.message.collectAsState()
     val subs by vm.subs.collectAsState()
     val embeddedTextTracks by vm.embeddedTextTracks.collectAsState()
@@ -555,7 +557,7 @@ fun PlayerScreen(
                     // surface scaling, which is why the old modes did nothing on
                     // some videos).
                     pv.resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT
-                    applyAspectTransform(pv, aspectMode, videoSize, screenAspect)
+                    applyAspectTransform(pv, aspectMode, videoSize, screenAspect, stretchYPct, stretchXPct)
                 },
                 modifier = Modifier.fillMaxSize(),
             )
@@ -999,11 +1001,11 @@ fun PlayerScreen(
                             )
                             DropdownMenu(expanded = openMenu == "subsync", onDismissRequest = { openMenu = null }) {
                                 DropdownMenuItem(
-                                    text = { Text("Subtitles early → make them later (+)\nSubtitles late → make them earlier (−)", style = MaterialTheme.typography.labelSmall) },
+                                    text = { Text("Subtitles early → make them later (+)\nSubtitles late → make them earlier (−)\nrange ±60s, ms precision", style = MaterialTheme.typography.labelSmall) },
                                     onClick = {},
                                     enabled = false,
                                 )
-                                listOf(-1000, -500, -250).forEach { d ->
+                                listOf(-5_000, -2_000, -1_000, -500, -250, -100).forEach { d ->
                                     DropdownMenuItem(
                                         text = { Text("− ${absSec(d)}s  (earlier)") },
                                         onClick = { vm.nudgeSubDelay(d); openMenu = null },
@@ -1013,7 +1015,7 @@ fun PlayerScreen(
                                     text = { Text("Reset — 0s") },
                                     onClick = { vm.resetSubDelay(); openMenu = null },
                                 )
-                                listOf(250, 500, 1000).forEach { d ->
+                                listOf(100, 250, 500, 1_000, 2_000, 5_000).forEach { d ->
                                     DropdownMenuItem(
                                         text = { Text("+ ${absSec(d)}s  (later)") },
                                         onClick = { vm.nudgeSubDelay(d); openMenu = null },
@@ -1133,6 +1135,43 @@ fun PlayerScreen(
                         }
                     }
 
+                    // manual stretch (vertical/horizontal, on top of the aspect mode)
+                    Box {
+                        MenuButton(
+                            icon = { Icon(Icons.Filled.OpenInFull, null, tint = Color.White) },
+                            label = stretchShort(stretchYPct, stretchXPct),
+                            open = openMenu == "stretch",
+                            onClick = { openMenu = if (openMenu == "stretch") null else "stretch" },
+                        )
+                        DropdownMenu(expanded = openMenu == "stretch", onDismissRequest = { openMenu = null }) {
+                            DropdownMenuItem(
+                                text = { Text("For movies with bars burned into the picture\nand screens needing sideways stretch", style = MaterialTheme.typography.labelSmall) },
+                                onClick = {},
+                                enabled = false,
+                            )
+                            DropdownMenuItem(
+                                text = { Text("Vertical stretch +5%  (${stretchYPct}%)") },
+                                onClick = { vm.nudgeStretch(vertical = true, deltaPct = +5) },
+                            )
+                            DropdownMenuItem(
+                                text = { Text("Vertical stretch −5%  (${stretchYPct}%)") },
+                                onClick = { vm.nudgeStretch(vertical = true, deltaPct = -5) },
+                            )
+                            DropdownMenuItem(
+                                text = { Text("Horizontal stretch +5%  (${stretchXPct}%)") },
+                                onClick = { vm.nudgeStretch(vertical = false, deltaPct = +5) },
+                            )
+                            DropdownMenuItem(
+                                text = { Text("Horizontal stretch −5%  (${stretchXPct}%)") },
+                                onClick = { vm.nudgeStretch(vertical = false, deltaPct = -5) },
+                            )
+                            DropdownMenuItem(
+                                text = { Text("Reset stretch — 100%") },
+                                onClick = { vm.resetStretch(); openMenu = null },
+                            )
+                        }
+                    }
+
                     // quality
                     Box {
                         MenuButton(
@@ -1190,14 +1229,25 @@ private fun aspectShort(m: AspectMode): String = when (m) {
     AspectMode.ZOOM -> "Zoom"
 }
 
-/** "Sync +2.5s" / "Sync 0s" — the label on the CC-sync button. */
+/** "Sync +2.35s" / "Sync 0s" — ms precision on the CC-sync button. */
 private fun syncShort(delayMs: Int): String {
     val s = delayMs / 1000f
     val sign = if (delayMs > 0) "+" else if (delayMs < 0) "−" else ""
-    return "Sync ${sign}${"%.1f".format(kotlin.math.abs(s))}s"
+    return "Sync ${sign}${"%.2f".format(kotlin.math.abs(s))}s"
 }
 
 private fun absSec(ms: Int): String = "%.2f".format(kotlin.math.abs(ms / 1000f)).trimEnd('0').trimEnd('.').ifEmpty { "0" }
+
+/** "V130%" / "H120%" / "Stretch" — label on the manual-stretch button. */
+private fun stretchShort(yPct: Int, xPct: Int): String =
+    if (yPct == 100 && xPct == 100) "Stretch"
+    else buildString {
+        if (yPct != 100) append("V").append(yPct).append('%')
+        if (xPct != 100) {
+            if (isNotEmpty()) append(" ")
+            append("H").append(xPct).append('%')
+        }
+    }
 
 /**
  * The app-rendered subtitle overlay (vidfast/vidcore/mapple architecture:
@@ -1276,12 +1326,18 @@ private fun fallbackEmbed(request: PlaybackRequest): String? =
  *    (no black bars anywhere). AUTO leaves near-matching videos untouched.
  *  - ZOOM: uniform scale up + crop (covers, keeps proportions).
  *  - FIT: reset.
+ *  - [stretchYPct]/[stretchXPct] (100–160%) are MANUAL multipliers applied on
+ *    top of whatever the mode computed — the fix for movies with black bars
+ *    burned into the frame (no player can detect those) and for screens that
+ *    need sideways stretch.
  */
 private fun applyAspectTransform(
     pv: PlayerView,
     mode: AspectMode,
     videoSize: VideoSize?,
     screenAspect: Float,
+    stretchYPct: Int = 100,
+    stretchXPct: Int = 100,
 ) {
     if (screenAspect <= 0f) return
     val videoAspect = videoSize
@@ -1301,7 +1357,9 @@ private fun applyAspectTransform(
             } else if (rel < 1f) {
                 scaleX = 1f / rel
             }
-            if (mode == AspectMode.AUTO && abs(rel - 1f) < 0.02f) {
+            // AUTO only skips stretching for truly matching ratios (0.5% —
+            // subtler mismatches like 1.78 vs 1.85 still get filled).
+            if (mode == AspectMode.AUTO && abs(rel - 1f) < 0.005f) {
                 scaleX = 1f; scaleY = 1f
             }
         }
@@ -1312,6 +1370,10 @@ private fun applyAspectTransform(
             scaleY = s
         }
     }
+
+    // manual stretch multipliers (100% = no-op)
+    scaleY *= stretchYPct / 100f
+    scaleX *= stretchXPct / 100f
 
     val target = runCatching { pv.videoSurfaceView }.getOrNull() ?: pv
     target.scaleX = scaleX
