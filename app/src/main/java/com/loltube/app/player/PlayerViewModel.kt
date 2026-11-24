@@ -264,6 +264,26 @@ class PlayerViewModel(
             val stream = currentStream
             val codecClass = isCodecClassError(error)
 
+            // URL/sideload-class failures are provider-INDEPENDENT (the same
+            // sidecars and the same URL pipeline follow us to every source) —
+            // switching providers can never fix them. The classic case was the
+            // pre-attached file:// subtitle fed to OkHttpDataSource ->
+            // HttpDataSourceException("Malformed URL", RUNTIME_CHECK); the scheme
+            // routing in PlayerEngine fixes the root cause, and this guard makes
+            // ANY future sideload poisoning self-heal instead of cascading into
+            // "switching source" loops: drop the sidecar, rebuild, continue.
+            val errorText = generateSequence<Throwable>(error as Throwable) { it.cause }
+                .joinToString(" <- ") { "${it.javaClass.simpleName}: ${it.message}" }
+            if (errorText.contains("Malformed URL", ignoreCase = true) && activeSubtitle != null) {
+                _message.value = "Subtitle sidecar failed to load — restarting without it…"
+                AppLog.e("Recovery", "Malformed-URL error with a sidecar attached — dropping subtitle and rebuilding")
+                activeSubtitle = null
+                _activeSubLabel.value = null
+                recoveryStage = 2
+                rebuildAtPosition(capHeight = null, safeMode = false)
+                return
+            }
+
             // Long sessions: the CDN token (the ?s=... in the m3u8 URL) expires
             // after ~1h — re-resolve the stream at the current position.
             if (!autoReResolved && stream != null && played > 5 * 60_000) {
@@ -474,22 +494,13 @@ class PlayerViewModel(
             }
             currentRequest = currentRequest.copy(startAtMs = effectiveStartMs)
 
-            fetchSubtitles(currentRequest)
+            // Subtitles are SITE-NATIVE first: the listing the provider's own page
+            // loaded (harvested via the /wyzie proxy in WebViewHarvester — the
+            // exact tracks the site's own player shows), plus any tracks embedded
+            // in the stream manifest itself. No separate subtitle API is called
+            // up-front anymore; Wyzie.fetch stays only as the post-resolve
+            // fallback inside startResolve for titles whose page yielded nothing.
             startResolve(currentRequest, reusePlayer = false)
-        }
-    }
-
-    private fun fetchSubtitles(req: PlaybackRequest) {
-        viewModelScope.launch {
-            val wyzieSubs = Wyzie.fetch(req.imdbId, req.season, req.episode)
-            mergeSubs(wyzieSubs)
-            // Attach BEFORE playback starts if we can (no disruption); once the
-            // player is running we do NOT auto re-attach — swapping the media
-            // item mid-playback cancels all in-flight loads and is exactly the
-            // race that crashed ExoPlayer with ERROR_CODE_FAILED_RUNTIME_CHECK.
-            // The subtitle menu still allows manual selection, and embedded
-            // manifest tracks auto-select via track parameters (no restart).
-            if (_phase.value !is Phase.Ready) preAttachSubtitle()
         }
     }
 
@@ -497,7 +508,9 @@ class PlayerViewModel(
      * Download the preferred subtitle BEFORE the first prepare so it ships with
      * the initial MediaItem — subtitles appear immediately and nothing has to
      * be restarted later. Bounded to 4s: a slow subtitle host must never delay
-     * the video.
+     * the video. The preferred source is the SITE's own listing
+     * ([providerSubs], captured from the page's /wyzie call); the direct API
+     * ([_subs], filled by the fallback) is only used when that was empty.
      */
     private suspend fun preAttachSubtitle() {
         if (preAttachTried) return
@@ -611,6 +624,19 @@ class PlayerViewModel(
             currentRequest = req
             providerSubs = stream.subs
             if (providerSubs.isNotEmpty()) mergeSubs(emptyList())
+
+            // Site-native subtitle listing came back empty (mapple, or a page
+            // whose /wyzie call failed): fall back to the shared subtitle index
+            // so the menu still offers tracks. Log it honestly.
+            if (providerSubs.isEmpty()) {
+                viewModelScope.launch {
+                    val wyzieSubs = Wyzie.fetch(req.imdbId, req.season, req.episode)
+                    if (wyzieSubs.isNotEmpty()) {
+                        mergeSubs(wyzieSubs)
+                        AppLog.d("Subs", "site listing empty — subtitle-API fallback: ${wyzieSubs.size} track(s)")
+                    }
+                }
+            }
 
             // fresh stream re-arms the recovery ladder (but NOT the session
             // decoder cap — a box that crashed at 4K must not crash again)
@@ -1005,7 +1031,8 @@ class PlayerViewModel(
         _embeddedTextTracks.value = emptyList()
         _message.value = "Loading S$season E$episode…"
         currentRequest = req
-        fetchSubtitles(req)
+        // No direct subtitle-API call here: the new episode's listing comes from
+        // its own harvest (or the fallback inside startResolve when empty).
         startResolve(req, reusePlayer = true)
     }
 

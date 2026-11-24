@@ -5,6 +5,7 @@ import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MimeTypes
 import androidx.media3.common.util.UnstableApi
+import androidx.media3.datasource.DefaultDataSource
 import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
@@ -112,12 +113,21 @@ object PlayerEngine {
             .setDefaultRequestProperties(streamHeaders)
 
         val mediaSourceFactory: DefaultMediaSourceFactory = if (safeMode) {
-            // fail-safe: network only, nothing between the player and the CDN
-            DefaultMediaSourceFactory(httpFactory)
+            // fail-safe: network only, nothing between the player and the CDN — but
+            // still scheme-ROUTED (DefaultDataSource). Feeding file:// subtitle
+            // sidecars straight into OkHttpDataSource was the actual
+            // ERROR_CODE_FAILED_RUNTIME_CHECK killer: media3's OkHttp datasource
+            // runs HttpUrl.parse(), which returns null ("Malformed URL") for
+            // anything that is not http/https — including the file:// URIs of the
+            // pre-attached subtitles — and throws that as a FATAL error.
+            DefaultMediaSourceFactory(DefaultDataSource.Factory(context, httpFactory))
         } else {
             // Every byte the player reads (manifests + segments) flows through the
             // disk cache AND the crash-proof wrapper. TurboPrefetcher fills the
-            // cache ahead of the playhead.
+            // cache ahead of the playhead. DefaultDataSource in front routes by
+            // scheme: http(s) -> cache/OkHttp pipeline, file:// -> FileDataSource
+            // (subtitle sidecars!), content:// -> ContentDataSource. This is what
+            // finally makes subtitles load instead of killing the stream.
             val cache = PlaybackCache.get(context)
             val cacheFactory = androidx.media3.datasource.cache.CacheDataSource.Factory()
                 .setCache(cache)
@@ -125,7 +135,9 @@ object PlayerEngine {
                 .setFlags(
                     androidx.media3.datasource.cache.CacheDataSource.FLAG_IGNORE_CACHE_ON_ERROR
                 )
-            DefaultMediaSourceFactory(SafeDataSource.Factory(cacheFactory))
+            DefaultMediaSourceFactory(
+                DefaultDataSource.Factory(context, SafeDataSource.Factory(cacheFactory))
+            )
         }
 
         // Warm-start the ABR with the bandwidth we measured last session (slightly
