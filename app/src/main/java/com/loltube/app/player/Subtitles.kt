@@ -63,10 +63,14 @@ object Subtitles {
                 continue
             }
 
-            val (startMs, endMs) = parseTimestamps(lines[tsIdx]) ?: run {
+            val stamps = parseTimestamps(lines[tsIdx])
+            if (stamps == null) {
+                // not a valid cue block — skip past and retry
                 i = tsIdx + 1
                 continue
             }
+            val startMs = stamps.first
+            val endMs = stamps.second
 
             // cue text = lines until blank
             val sb = StringBuilder()

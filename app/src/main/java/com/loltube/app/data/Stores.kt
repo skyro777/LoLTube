@@ -81,7 +81,7 @@ data class AppSettings(
      *  Each source's video copy is trimmed differently, so the offset that
      *  fixes one source is wrong for another — that's why it's per-provider. */
     val subDelayByProvider: Map<ProviderId, Int> = emptyMap(),
-}
+)
 
 object SettingsStore {
     private val KEY_PROVIDER_ORDER = stringPreferencesKey("provider_order")

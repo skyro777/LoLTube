@@ -61,11 +61,11 @@ import androidx.compose.ui.unit.sp
 import com.loltube.app.data.AppSettings
 import com.loltube.app.data.AspectMode
 import com.loltube.app.data.BufferProfile
-import com.loltube.app.data.ProviderId
 import com.loltube.app.data.QualityMode
 import com.loltube.app.data.SettingsStore
 import com.loltube.app.data.SubColor
 import com.loltube.app.data.SubSize
+import com.loltube.app.providers.ProviderId
 import kotlinx.coroutines.launch
 
 private val SUB_LANGUAGES = listOf(
