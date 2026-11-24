@@ -1,130 +1,34 @@
-[10:24:59.389] [Resolver] === Vidfast: https://vidfast.vc/movie/tt33764258
-[10:25:00.423] [Wyzie] subtitle English downloaded (117433 chars, application/x-subrip, referer=https://vidfast.vc/)
-[10:25:00.428] [Subs] pre-attached "English" before first prepare
-[10:25:00.769] [Harvest] js: Permissions policy violation: unload is not allowed in this document.
-[10:25:00.796] [Harvest] js: Permissions policy violation: unload is not allowed in this document.
-[10:25:05.187] [Harvest] captured [m3u8] https://moon.goldenkite.top/vd/QUMyV0VMaHRzbjFEbzg3V3NmOHh2dzo5ajI5UVo2Q0JDaEJYdEVlTUxzM1N3cnBzdUVsMjd3LVEwYUxUXzgybHEw/master.m3u8?s=s1.1795517706.4.TOklXv186o
-[10:25:05.768] [Harvest] captured [m3u8] https://moon.goldenkite.top/vd/QUMyV0VMaHRzbjFEbzg3V3NmOHh2dzo5ajI5UVo2Q0JDaEJYdEVlTUxzM1N3cnBzdUVsMjd3LVEwYUxUXzgybHEw/sd/77/index-s1080p-v1-a1.m3u8?s=s1.17955
-[10:25:06.959] [Harvest] captured 28 subtitle track(s) from page
-[10:25:09.629] [Verify] [Vidfast] OK m3u8-master: https://moon.goldenkite.top/vd/QUMyV0VMaHRzbjFEbzg3V3NmOHh2dzo5ajI5UVo2Q0JDaEJYdEVlTUxzM1N3cnBzdUVsMjd3LVEwYUxUXzgybHEw/master.m3u8?s=s1.179
-[10:25:09.946] [Ladder] site ladder: 2160p avc1.640033 @ 16.2 Mbps, 1080p avc1.640028 @ 6.2 Mbps, 720p avc1.4d401f @ 3.1 Mbps, 480p avc1.4d401e @ 1.3 Mbps
-[10:25:09.953] [Ladder] 4K 2160p decodable (avc1.640033) — full quality enabled
-[10:25:09.979] [PlaybackCache] opening segment cache at /data/user/0/com.loltube.app/cache/media_cache (budget 800 MB)
-[10:25:10.101] [Player] quality mode -> AUTO (ceiling 2160p -> effective 2160p)
-[10:25:10.102] [Player] quality mode -> AUTO (ceiling 2160p -> effective 2160p)
-[10:25:12.141] [TurboPrefetch] playlist parsed: 1727 segments, warming ahead of the playhead
-[10:25:15.000] [Player] ERROR playback error: ERROR_CODE_FAILED_RUNTIME_CHECK :: ExoPlaybackException(Source error) <- HttpDataSourceException(Malformed URL) :: ExoPlaybackException(Source error) <- HttpDataSourceException(Malformed URL) @ ExoPlayerImplInternal.handleIoException:736 ExoPlayerImplInternal.handleMessage:708 Handler.dispatchMessage:103 Looper.loop:214 HandlerThread.run:67 OkHttpDataSource.makeRequest:369 OkHttpDataSource.open:262 TeeDataSource.open:54 CacheDataSource.openNextSource:802 CacheDataSource.open:615 SafeDataSource.open:53
-[10:25:15.001] [Recovery] codec error ERROR_CODE_FAILED_RUNTIME_CHECK: full rebuild, fresh codecs
-[10:25:15.002] [TurboPrefetch] prefetch miss https://greenkite.top/vd/QUMyV0VMaHRzbjFEbzg3V3NmOHh2dzo5ajI5UVo2Q0JDaEJYdEVlTUx: java.io.InterruptedIOException
-[10:25:15.002] [TurboPrefetch] prefetch miss https://greenkite.top/vd/QUMyV0VMaHRzbjFEbzg3V3NmOHh2dzo5ajI5UVo2Q0JDaEJYdEVlTUx: java.io.InterruptedIOException
-[10:25:15.002] [TurboPrefetch] prefetch miss https://greenkite.top/vd/QUMyV0VMaHRzbjFEbzg3V3NmOHh2dzo5ajI5UVo2Q0JDaEJYdEVlTUx: java.io.InterruptedIOException
-[10:25:15.003] [TurboPrefetch] prefetch miss https://greenkite.top/vd/QUMyV0VMaHRzbjFEbzg3V3NmOHh2dzo5ajI5UVo2Q0JDaEJYdEVlTUx: java.io.InterruptedIOException
-[10:25:15.019] [Player] quality mode -> AUTO (ceiling 2160p -> effective 2160p)
-[10:25:15.020] [Player] quality mode -> AUTO (ceiling 2160p -> effective 2160p)
-[10:25:15.271] [TurboPrefetch] playlist parsed: 1727 segments, warming ahead of the playhead
-[10:25:18.170] [Player] ERROR playback error: ERROR_CODE_FAILED_RUNTIME_CHECK :: ExoPlaybackException(Source error) <- HttpDataSourceException(Malformed URL) :: ExoPlaybackException(Source error) <- HttpDataSourceException(Malformed URL) @ ExoPlayerImplInternal.handleIoException:736 ExoPlayerImplInternal.handleMessage:708 Handler.dispatchMessage:103 Looper.loop:214 HandlerThread.run:67 OkHttpDataSource.makeRequest:369 OkHttpDataSource.open:262 TeeDataSource.open:54 CacheDataSource.openNextSource:802 CacheDataSource.open:615 SafeDataSource.open:53
-[10:25:18.171] [Recovery] step-down rebuild, cap 1080p
-[10:25:18.172] [TurboPrefetch] prefetch miss https://greenkite.top/vd/QUMyV0VMaHRzbjFEbzg3V3NmOHh2dzo5ajI5UVo2Q0JDaEJYdEVlTUx: java.io.InterruptedIOException
-[10:25:18.173] [TurboPrefetch] prefetch miss https://greenkite.top/vd/QUMyV0VMaHRzbjFEbzg3V3NmOHh2dzo5ajI5UVo2Q0JDaEJYdEVlTUx: java.io.InterruptedIOException
-[10:25:18.175] [TurboPrefetch] prefetch miss https://greenkite.top/vd/QUMyV0VMaHRzbjFEbzg3V3NmOHh2dzo5ajI5UVo2Q0JDaEJYdEVlTUx: java.io.InterruptedIOException
-[10:25:18.176] [TurboPrefetch] prefetch miss https://greenkite.top/vd/QUMyV0VMaHRzbjFEbzg3V3NmOHh2dzo5ajI5UVo2Q0JDaEJYdEVlTUx: java.io.InterruptedIOException
-[10:25:18.192] [Player] quality mode -> AUTO (ceiling 2160p -> effective 2160p)
-[10:25:18.192] [Player] quality mode -> AUTO (ceiling 2160p -> effective 1080p)
-[10:25:18.437] [TurboPrefetch] playlist parsed: 1727 segments, warming ahead of the playhead
-[10:25:21.349] [Player] ERROR playback error: ERROR_CODE_FAILED_RUNTIME_CHECK :: ExoPlaybackException(Source error) <- HttpDataSourceException(Malformed URL) :: ExoPlaybackException(Source error) <- HttpDataSourceException(Malformed URL) @ ExoPlayerImplInternal.handleIoException:736 ExoPlayerImplInternal.handleMessage:708 Handler.dispatchMessage:103 Looper.loop:214 HandlerThread.run:67 OkHttpDataSource.makeRequest:369 OkHttpDataSource.open:262 TeeDataSource.open:54 CacheDataSource.openNextSource:802 CacheDataSource.open:615 SafeDataSource.open:53
-[10:25:21.349] [Recovery] safe-mode rebuild, cap 720p
-[10:25:21.351] [TurboPrefetch] prefetch miss https://greenkite.top/vd/QUMyV0VMaHRzbjFEbzg3V3NmOHh2dzo5ajI5UVo2Q0JDaEJYdEVlTUx: java.io.InterruptedIOException
-[10:25:21.351] [TurboPrefetch] prefetch miss https://greenkite.top/vd/QUMyV0VMaHRzbjFEbzg3V3NmOHh2dzo5ajI5UVo2Q0JDaEJYdEVlTUx: java.io.InterruptedIOException
-[10:25:21.353] [TurboPrefetch] prefetch miss https://greenkite.top/vd/QUMyV0VMaHRzbjFEbzg3V3NmOHh2dzo5ajI5UVo2Q0JDaEJYdEVlTUx: java.io.InterruptedIOException
-[10:25:21.355] [TurboPrefetch] prefetch miss https://greenkite.top/vd/QUMyV0VMaHRzbjFEbzg3V3NmOHh2dzo5ajI5UVo2Q0JDaEJYdEVlTUx: java.io.InterruptedIOException
-[10:25:21.367] [Player] quality mode -> AUTO (ceiling 2160p -> effective 2160p)
-[10:25:21.368] [Player] quality mode -> AUTO (ceiling 2160p -> effective 720p)
-[10:25:21.930] [CapFilter] master playlist: dropped 2 variant(s) above 720p
-[10:25:26.266] [Player] ERROR playback error: ERROR_CODE_FAILED_RUNTIME_CHECK :: ExoPlaybackException(Source error) <- HttpDataSourceException(Malformed URL) :: ExoPlaybackException(Source error) <- HttpDataSourceException(Malformed URL) @ ExoPlayerImplInternal.handleIoException:736 ExoPlayerImplInternal.handleMessage:708 Handler.dispatchMessage:103 Looper.loop:214 HandlerThread.run:67 OkHttpDataSource.makeRequest:369 OkHttpDataSource.open:262 StatsDataSource.open:86 ProgressiveMediaPeriod$ExtractingLoadable.load:1045 Loader$LoadTask.run:421 ThreadPoolExecutor.runWorker:1167
-[10:25:26.269] [Watchdog] stalling on Vidfast — switching to Vidcore
-[10:25:26.270] [Resolver] === Vidcore: https://vidcore.io/movie/tt33764258
-[10:25:27.347] [Harvest] js: Permissions policy violation: unload is not allowed in this document.
-[10:25:30.157] [Player] quality mode -> CAP_1080 (ceiling 1088p -> effective 720p)
-[10:25:30.468] [Harvest] captured [m3u8] https://moon.goldenkite.top/vd/QUMyV0VMaHRzbjFEbzg3V3NmOHh2dzo5ajI5UVo2Q0JDaEJYdEVlTUxzM1N3cnBzdUVsMjd3LVEwYUxUXzgybHEw/master.m3u8?s=s1.1795517731.4.5PyLYit8tj
-[10:25:30.767] [Harvest] captured [m3u8] https://moon.goldenkite.top/vd/QUMyV0VMaHRzbjFEbzg3V3NmOHh2dzo5ajI5UVo2Q0JDaEJYdEVlTUxzM1N3cnBzdUVsMjd3LVEwYUxUXzgybHEw/sd/77/index-s1080p-v1-a1.m3u8?s=s1.17955
-[10:25:32.408] [Harvest] captured 28 subtitle track(s) from page
-[10:25:32.506] [Harvest] page reports playback started
-[10:25:34.212] [Verify] [Vidcore] OK m3u8-master: https://moon.goldenkite.top/vd/QUMyV0VMaHRzbjFEbzg3V3NmOHh2dzo5ajI5UVo2Q0JDaEJYdEVlTUxzM1N3cnBzdUVsMjd3LVEwYUxUXzgybHEw/master.m3u8?s=s1.179
-[10:25:34.512] [Ladder] site ladder: 2160p avc1.640033 @ 16.2 Mbps, 1080p avc1.640028 @ 6.2 Mbps, 720p avc1.4d401f @ 3.1 Mbps, 480p avc1.4d401e @ 1.3 Mbps
-[10:25:34.514] [Ladder] 4K 2160p decodable (avc1.640033) — full quality enabled
-[10:25:34.515] [Player] quality mode -> CAP_1080 (ceiling 1088p -> effective 720p)
-[10:25:34.802] [CapFilter] master playlist: dropped 2 variant(s) above 720p
-[10:25:38.812] [Player] ERROR playback error: ERROR_CODE_FAILED_RUNTIME_CHECK :: ExoPlaybackException(Source error) <- HttpDataSourceException(Malformed URL) :: ExoPlaybackException(Source error) <- HttpDataSourceException(Malformed URL) @ ExoPlayerImplInternal.handleIoException:736 ExoPlayerImplInternal.handleMessage:708 Handler.dispatchMessage:103 Looper.loop:214 HandlerThread.run:67 OkHttpDataSource.makeRequest:369 OkHttpDataSource.open:262 StatsDataSource.open:86 ProgressiveMediaPeriod$ExtractingLoadable.load:1045 Loader$LoadTask.run:421 ThreadPoolExecutor.runWorker:1167
-[10:25:38.813] [Recovery] step-down rebuild, cap 1080p
-[10:25:38.840] [Player] quality mode -> AUTO (ceiling 2160p -> effective 2160p)
-[10:25:38.842] [Player] quality mode -> CAP_1080 (ceiling 1088p -> effective 1080p)
-[10:25:39.646] [CapFilter] master playlist: dropped 1 variant(s) above 1080p
-[10:25:40.923] [TurboPrefetch] playlist parsed: 1727 segments, warming ahead of the playhead
-[10:25:43.820] [Player] ERROR playback error: ERROR_CODE_FAILED_RUNTIME_CHECK :: ExoPlaybackException(Source error) <- HttpDataSourceException(Malformed URL) :: ExoPlaybackException(Source error) <- HttpDataSourceException(Malformed URL) @ ExoPlayerImplInternal.handleIoException:736 ExoPlayerImplInternal.handleMessage:708 Handler.dispatchMessage:103 Looper.loop:214 HandlerThread.run:67 OkHttpDataSource.makeRequest:369 OkHttpDataSource.open:262 TeeDataSource.open:54 CacheDataSource.openNextSource:802 CacheDataSource.open:615 SafeDataSource.open:53
-[10:25:43.821] [Recovery] safe-mode rebuild, cap 720p
-[10:25:43.822] [TurboPrefetch] prefetch miss https://greenkite.top/vd/QUMyV0VMaHRzbjFEbzg3V3NmOHh2dzo5ajI5UVo2Q0JDaEJYdEVlTUx: java.io.InterruptedIOException
-[10:25:43.824] [TurboPrefetch] prefetch miss https://greenkite.top/vd/QUMyV0VMaHRzbjFEbzg3V3NmOHh2dzo5ajI5UVo2Q0JDaEJYdEVlTUx: java.io.InterruptedIOException
-[10:25:43.824] [TurboPrefetch] prefetch miss https://greenkite.top/vd/QUMyV0VMaHRzbjFEbzg3V3NmOHh2dzo5ajI5UVo2Q0JDaEJYdEVlTUx: java.io.InterruptedIOException
-[10:25:43.825] [TurboPrefetch] prefetch miss https://greenkite.top/vd/QUMyV0VMaHRzbjFEbzg3V3NmOHh2dzo5ajI5UVo2Q0JDaEJYdEVlTUx: java.io.InterruptedIOException
-[10:25:43.844] [Player] quality mode -> AUTO (ceiling 2160p -> effective 2160p)
-[10:25:43.845] [Player] quality mode -> CAP_1080 (ceiling 1088p -> effective 720p)
-[10:25:44.418] [CapFilter] master playlist: dropped 2 variant(s) above 720p
-[10:25:48.516] [Player] ERROR playback error: ERROR_CODE_FAILED_RUNTIME_CHECK :: ExoPlaybackException(Source error) <- HttpDataSourceException(Malformed URL) :: ExoPlaybackException(Source error) <- HttpDataSourceException(Malformed URL) @ ExoPlayerImplInternal.handleIoException:736 ExoPlayerImplInternal.handleMessage:708 Handler.dispatchMessage:103 Looper.loop:214 HandlerThread.run:67 OkHttpDataSource.makeRequest:369 OkHttpDataSource.open:262 StatsDataSource.open:86 ProgressiveMediaPeriod$ExtractingLoadable.load:1045 Loader$LoadTask.run:421 ThreadPoolExecutor.runWorker:1167
-[10:25:48.517] [Watchdog] stalling on Vidcore — switching to Vidfast
-[10:25:48.518] [Resolver] === Vidfast: https://vidfast.vc/movie/tt33764258
-[10:25:48.971] [Harvest] js: Permissions policy violation: unload is not allowed in this document.
-[10:25:48.984] [Harvest] js: Permissions policy violation: unload is not allowed in this document.
-[10:25:51.694] [Harvest] captured [m3u8] https://moon.goldenkite.top/vd/QUMyV0VMaHRzbjFEbzg3V3NmOHh2dzo5ajI5UVo2Q0JDaEJYdEVlTUxzM1N3cnBzdUVsMjd3LVEwYUxUXzgybHEw/master.m3u8?s=s1.1795517752.4.oWnvmbEzIE
-[10:25:52.003] [Harvest] captured [m3u8] https://moon.goldenkite.top/vd/QUMyV0VMaHRzbjFEbzg3V3NmOHh2dzo5ajI5UVo2Q0JDaEJYdEVlTUxzM1N3cnBzdUVsMjd3LVEwYUxUXzgybHEw/sd/77/index-s1080p-v1-a1.m3u8?s=s1.17955
-[10:25:52.865] [Harvest] captured 28 subtitle track(s) from page
-[10:25:53.029] [Harvest] page reports playback started
-[10:25:54.655] [Watchdog] Reconnecting stream…
-[10:25:54.917] [CapFilter] master playlist: dropped 2 variant(s) above 720p
-[10:25:55.178] [Verify] [Vidfast] OK m3u8-master: https://moon.goldenkite.top/vd/QUMyV0VMaHRzbjFEbzg3V3NmOHh2dzo5ajI5UVo2Q0JDaEJYdEVlTUxzM1N3cnBzdUVsMjd3LVEwYUxUXzgybHEw/master.m3u8?s=s1.179
-[10:25:55.484] [Ladder] site ladder: 2160p avc1.640033 @ 16.2 Mbps, 1080p avc1.640028 @ 6.2 Mbps, 720p avc1.4d401f @ 3.1 Mbps, 480p avc1.4d401e @ 1.3 Mbps
-[10:25:55.486] [Ladder] 4K 2160p decodable (avc1.640033) — full quality enabled
-[10:25:55.488] [Player] quality mode -> CAP_1080 (ceiling 1088p -> effective 720p)
-[10:25:55.831] [CapFilter] master playlist: dropped 2 variant(s) above 720p
-[10:25:59.713] [Player] ERROR playback error: ERROR_CODE_FAILED_RUNTIME_CHECK :: ExoPlaybackException(Source error) <- HttpDataSourceException(Malformed URL) :: ExoPlaybackException(Source error) <- HttpDataSourceException(Malformed URL) @ ExoPlayerImplInternal.handleIoException:736 ExoPlayerImplInternal.handleMessage:708 Handler.dispatchMessage:103 Looper.loop:214 HandlerThread.run:67 OkHttpDataSource.makeRequest:369 OkHttpDataSource.open:262 StatsDataSource.open:86 ProgressiveMediaPeriod$ExtractingLoadable.load:1045 Loader$LoadTask.run:421 ThreadPoolExecutor.runWorker:1167
-[10:25:59.714] [Recovery] step-down rebuild, cap 1080p
-[10:25:59.748] [Player] quality mode -> AUTO (ceiling 2160p -> effective 2160p)
-[10:25:59.749] [Player] quality mode -> CAP_1080 (ceiling 1088p -> effective 1080p)
-[10:26:00.320] [CapFilter] master playlist: dropped 1 variant(s) above 1080p
-[10:26:01.541] [TurboPrefetch] playlist parsed: 1727 segments, warming ahead of the playhead
-[10:26:04.450] [Player] ERROR playback error: ERROR_CODE_FAILED_RUNTIME_CHECK :: ExoPlaybackException(Source error) <- HttpDataSourceException(Malformed URL) :: ExoPlaybackException(Source error) <- HttpDataSourceException(Malformed URL) @ ExoPlayerImplInternal.handleIoException:736 ExoPlayerImplInternal.handleMessage:708 Handler.dispatchMessage:103 Looper.loop:214 HandlerThread.run:67 OkHttpDataSource.makeRequest:369 OkHttpDataSource.open:262 TeeDataSource.open:54 CacheDataSource.openNextSource:802 CacheDataSource.open:615 SafeDataSource.open:53
-[10:26:04.451] [Recovery] safe-mode rebuild, cap 720p
-[10:26:04.452] [TurboPrefetch] prefetch miss https://greenkite.top/vd/QUMyV0VMaHRzbjFEbzg3V3NmOHh2dzo5ajI5UVo2Q0JDaEJYdEVlTUx: java.io.InterruptedIOException
-[10:26:04.453] [TurboPrefetch] prefetch miss https://greenkite.top/vd/QUMyV0VMaHRzbjFEbzg3V3NmOHh2dzo5ajI5UVo2Q0JDaEJYdEVlTUx: java.io.InterruptedIOException
-[10:26:04.454] [TurboPrefetch] prefetch miss https://greenkite.top/vd/QUMyV0VMaHRzbjFEbzg3V3NmOHh2dzo5ajI5UVo2Q0JDaEJYdEVlTUx: java.io.InterruptedIOException
-[10:26:04.456] [TurboPrefetch] prefetch miss https://greenkite.top/vd/QUMyV0VMaHRzbjFEbzg3V3NmOHh2dzo5ajI5UVo2Q0JDaEJYdEVlTUx: java.io.InterruptedIOException
-[10:26:04.468] [Player] quality mode -> AUTO (ceiling 2160p -> effective 2160p)
-[10:26:04.468] [Player] quality mode -> CAP_1080 (ceiling 1088p -> effective 720p)
-[10:26:04.958] [CapFilter] master playlist: dropped 2 variant(s) above 720p
-[10:26:09.006] [Player] ERROR playback error: ERROR_CODE_FAILED_RUNTIME_CHECK :: ExoPlaybackException(Source error) <- HttpDataSourceException(Malformed URL) :: ExoPlaybackException(Source error) <- HttpDataSourceException(Malformed URL) @ ExoPlayerImplInternal.handleIoException:736 ExoPlayerImplInternal.handleMessage:708 Handler.dispatchMessage:103 Looper.loop:214 HandlerThread.run:67 OkHttpDataSource.makeRequest:369 OkHttpDataSource.open:262 StatsDataSource.open:86 ProgressiveMediaPeriod$ExtractingLoadable.load:1045 Loader$LoadTask.run:421 ThreadPoolExecutor.runWorker:1167
-[10:26:09.007] [Watchdog] stalling on Vidfast — switching to Vidcore
-[10:26:09.007] [Resolver] === Vidcore: https://vidcore.io/movie/tt33764258
-[10:26:09.455] [Harvest] js: Permissions policy violation: unload is not allowed in this document.
-[10:26:11.209] [Harvest] captured [m3u8] https://moon.goldenkite.top/vd/QUMyV0VMaHRzbjFEbzg3V3NmOHh2dzo5ajI5UVo2Q0JDaEJYdEVlTUxzM1N3cnBzdUVsMjd3LVEwYUxUXzgybHEw/master.m3u8?s=s1.1795517772.4.mOabJ4AZb5
-[10:26:11.527] [Harvest] captured [m3u8] https://moon.goldenkite.top/vd/QUMyV0VMaHRzbjFEbzg3V3NmOHh2dzo5ajI5UVo2Q0JDaEJYdEVlTUxzM1N3cnBzdUVsMjd3LVEwYUxUXzgybHEw/sd/77/index-s1080p-v1-a1.m3u8?s=s1.17955
-[10:26:12.665] [Harvest] captured 28 subtitle track(s) from page
-[10:26:13.124] [Harvest] page reports playback started
-[10:26:14.869] [Verify] [Vidcore] OK m3u8-master: https://moon.goldenkite.top/vd/QUMyV0VMaHRzbjFEbzg3V3NmOHh2dzo5ajI5UVo2Q0JDaEJYdEVlTUxzM1N3cnBzdUVsMjd3LVEwYUxUXzgybHEw/master.m3u8?s=s1.179
-[10:26:15.170] [Ladder] site ladder: 2160p avc1.640033 @ 16.2 Mbps, 1080p avc1.640028 @ 6.2 Mbps, 720p avc1.4d401f @ 3.1 Mbps, 480p avc1.4d401e @ 1.3 Mbps
-[10:26:15.172] [Ladder] 4K 2160p decodable (avc1.640033) — full quality enabled
-[10:26:15.174] [Player] quality mode -> CAP_1080 (ceiling 1088p -> effective 720p)
-[10:26:15.460] [CapFilter] master playlist: dropped 2 variant(s) above 720p
-[10:26:19.535] [Player] ERROR playback error: ERROR_CODE_FAILED_RUNTIME_CHECK :: ExoPlaybackException(Source error) <- HttpDataSourceException(Malformed URL) :: ExoPlaybackException(Source error) <- HttpDataSourceException(Malformed URL) @ ExoPlayerImplInternal.handleIoException:736 ExoPlayerImplInternal.handleMessage:708 Handler.dispatchMessage:103 Looper.loop:214 HandlerThread.run:67 OkHttpDataSource.makeRequest:369 OkHttpDataSource.open:262 StatsDataSource.open:86 ProgressiveMediaPeriod$ExtractingLoadable.load:1045 Loader$LoadTask.run:421 ThreadPoolExecutor.runWorker:1167
-[10:26:19.535] [Recovery] step-down rebuild, cap 1080p
-[10:26:19.559] [Player] quality mode -> AUTO (ceiling 2160p -> effective 2160p)
-[10:26:19.560] [Player] quality mode -> CAP_1080 (ceiling 1088p -> effective 1080p)
-[10:26:20.114] [CapFilter] master playlist: dropped 1 variant(s) above 1080p
-[10:26:21.321] [TurboPrefetch] playlist parsed: 1727 segments, warming ahead of the playhead
-[10:26:24.226] [Player] ERROR playback error: ERROR_CODE_FAILED_RUNTIME_CHECK :: ExoPlaybackException(Source error) <- HttpDataSourceException(Malformed URL) :: ExoPlaybackException(Source error) <- HttpDataSourceException(Malformed URL) @ ExoPlayerImplInternal.handleIoException:736 ExoPlayerImplInternal.handleMessage:708 Handler.dispatchMessage:103 Looper.loop:214 HandlerThread.run:67 OkHttpDataSource.makeRequest:369 OkHttpDataSource.open:262 TeeDataSource.open:54 CacheDataSource.openNextSource:802 CacheDataSource.open:615 SafeDataSource.open:53
-[10:26:24.226] [Recovery] safe-mode rebuild, cap 720p
-[10:26:24.227] [TurboPrefetch] prefetch miss https://greenkite.top/vd/QUMyV0VMaHRzbjFEbzg3V3NmOHh2dzo5ajI5UVo2Q0JDaEJYdEVlTUx: java.io.InterruptedIOException
-[10:26:24.227] [TurboPrefetch] prefetch miss https://greenkite.top/vd/QUMyV0VMaHRzbjFEbzg3V3NmOHh2dzo5ajI5UVo2Q0JDaEJYdEVlTUx: java.io.InterruptedIOException
-[10:26:24.229] [TurboPrefetch] prefetch miss https://greenkite.top/vd/QUMyV0VMaHRzbjFEbzg3V3NmOHh2dzo5ajI5UVo2Q0JDaEJYdEVlTUx: java.io.InterruptedIOException
-[10:26:24.230] [TurboPrefetch] prefetch miss https://greenkite.top/vd/QUMyV0VMaHRzbjFEbzg3V3NmOHh2dzo5ajI5UVo2Q0JDaEJYdEVlTUx: java.io.InterruptedIOException
-[10:26:24.244] [Player] quality mode -> AUTO (ceiling 2160p -> effective 2160p)
-[10:26:24.244] [Player] quality mode -> CAP_1080 (ceiling 1088p -> effective 720p)
-[10:26:24.796] [CapFilter] master playlist: dropped 2 variant(s) above 720p
+[13:13:59.197] [Resolver] === Vidcore: https://vidcore.io/movie/tt33764258
+[13:14:00.109] [Harvest] js: Permissions policy violation: unload is not allowed in this document.
+[13:14:01.809] [Harvest] captured [m3u8] https://moon.goldenkite.top/vd/QUMyV0VMaHRzbjFEbzg3V3NmOHh2dzo5ajI5UVo2Q0JDaEJYdEVlTUxzM1N3cnBzdUVsMjd3LVEwYUxUXzgybHEw/master.m3u8?s=s1.1795527843.4.M6-h3bKfPE
+[13:14:02.472] [Harvest] captured [m3u8] https://moon.goldenkite.top/vd/QUMyV0VMaHRzbjFEbzg3V3NmOHh2dzo5ajI5UVo2Q0JDaEJYdEVlTUxzM1N3cnBzdUVsMjd3LVEwYUxUXzgybHEw/sd/77/index-s1080p-v1-a1.m3u8?s=s1.17955
+[13:14:04.281] [Harvest] captured 28 subtitle track(s) from page
+[13:14:04.395] [Harvest] page reports playback started
+[13:14:07.580] [Verify] [Vidcore] OK m3u8-master: https://moon.goldenkite.top/vd/QUMyV0VMaHRzbjFEbzg3V3NmOHh2dzo5ajI5UVo2Q0JDaEJYdEVlTUxzM1N3cnBzdUVsMjd3LVEwYUxUXzgybHEw/master.m3u8?s=s1.179
+[13:14:07.939] [Ladder] site ladder: 2160p avc1.640033 @ 16.2 Mbps, 1080p avc1.640028 @ 6.2 Mbps, 720p avc1.4d401f @ 3.1 Mbps, 480p avc1.4d401e @ 1.3 Mbps
+[13:14:07.941] [Ladder] 4K 2160p decodable (avc1.640033) — full quality enabled
+[13:14:08.145] [Wyzie] subtitle English downloaded (117433 chars, application/x-subrip, referer=https://vidcore.io/)
+[13:14:08.146] [Subs] pre-attached "English" before first prepare
+[13:14:08.155] [PlaybackCache] opening segment cache at /data/user/0/com.loltube.app/cache/media_cache (budget 800 MB)
+[13:14:08.213] [Player] quality mode -> MAX (ceiling 2160p -> effective 2160p)
+[13:14:08.214] [Player] quality mode -> MAX (ceiling 2160p -> effective 2160p)
+[13:14:09.764] [Subs] auto-selected the stream's embedded subtitle: English
+[13:14:14.781] [Player] quality mode -> MAX (ceiling 2160p -> effective 2160p)
+[13:14:31.140] [Player] quality mode -> CAP_1080 (ceiling 1088p -> effective 1088p)
+[13:14:32.453] [Player] quality mode -> MAX (ceiling 2160p -> effective 2160p)
+[13:14:47.117] [Resolver] === Vidfast: https://vidfast.vc/movie/tt33764258
+[13:14:47.926] [Harvest] js: Permissions policy violation: unload is not allowed in this document.
+[13:14:47.953] [Harvest] js: Permissions policy violation: unload is not allowed in this document.
+[13:14:51.461] [Harvest] captured [m3u8] https://moon.goldenkite.top/vd/QUMyV0VMaHRzbjFEbzg3V3NmOHh2dzo5ajI5UVo2Q0JDaEJYdEVlTUxzM1N3cnBzdUVsMjd3LVEwYUxUXzgybHEw/master.m3u8?s=s1.1795527892.4.uZ2i5fp-rQ
+[13:14:51.967] [Harvest] captured [m3u8] https://moon.goldenkite.top/vd/QUMyV0VMaHRzbjFEbzg3V3NmOHh2dzo5ajI5UVo2Q0JDaEJYdEVlTUxzM1N3cnBzdUVsMjd3LVEwYUxUXzgybHEw/sd/77/index-s1080p-v1-a1.m3u8?s=s1.17955
+[13:14:54.250] [Harvest] page reports playback started
+[13:14:54.473] [Harvest] captured 28 subtitle track(s) from page
+[13:14:56.042] [Verify] [Vidfast] OK m3u8-master: https://moon.goldenkite.top/vd/QUMyV0VMaHRzbjFEbzg3V3NmOHh2dzo5ajI5UVo2Q0JDaEJYdEVlTUxzM1N3cnBzdUVsMjd3LVEwYUxUXzgybHEw/master.m3u8?s=s1.179
+[13:14:56.408] [Ladder] site ladder: 2160p avc1.640033 @ 16.2 Mbps, 1080p avc1.640028 @ 6.2 Mbps, 720p avc1.4d401f @ 3.1 Mbps, 480p avc1.4d401e @ 1.3 Mbps
+[13:14:56.410] [Ladder] 4K 2160p decodable (avc1.640033) — full quality enabled
+[13:14:56.434] [Player] quality mode -> MAX (ceiling 2160p -> effective 2160p)
+[13:14:56.436] [Player] quality mode -> MAX (ceiling 2160p -> effective 2160p)
+[13:15:26.225] [TurboPrefetch] prefetch miss https://greenkite.top/vd/QUMyV0VMaHRzbjFEbzg3V3NmOHh2dzo5ajI5UVo2Q0JDaEJYdEVlTUx: java.io.InterruptedIOException
+[13:15:26.225] [TurboPrefetch] prefetch miss https://greenkite.top/vd/QUMyV0VMaHRzbjFEbzg3V3NmOHh2dzo5ajI5UVo2Q0JDaEJYdEVlTUx: java.io.InterruptedIOException
+[13:15:26.226] [TurboPrefetch] prefetch miss https://greenkite.top/vd/QUMyV0VMaHRzbjFEbzg3V3NmOHh2dzo5ajI5UVo2Q0JDaEJYdEVlTUx: java.io.InterruptedIOException
+[13:15:26.225] [TurboPrefetch] prefetch miss https://greenkite.top/vd/QUMyV0VMaHRzbjFEbzg3V3NmOHh2dzo5ajI5UVo2Q0JDaEJYdEVlTUx: java.io.InterruptedIOException
