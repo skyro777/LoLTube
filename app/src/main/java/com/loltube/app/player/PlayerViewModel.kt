@@ -126,14 +126,42 @@ class PlayerViewModel(
     private val _pendingNext = MutableStateFlow<PendingNext?>(null)
     val pendingNext: StateFlow<PendingNext?> = _pendingNext.asStateFlow()
 
+    /** Live cue text for the app-rendered subtitle overlay (null = nothing on screen). */
+    private val _cueText = MutableStateFlow<String?>(null)
+    val cueText: StateFlow<String?> = _cueText.asStateFlow()
+
+    /** Active per-source subtitle sync delay (ms). >0 = subtitles appear later. */
+    private val _subDelayMs = MutableStateFlow(0)
+    val subDelayMs: StateFlow<Int> = _subDelayMs.asStateFlow()
+
+    /** Subtitle appearance, rendered by the overlay (size / color / background). */
+    data class SubStyle(val sizePct: Int, val color: com.loltube.app.data.SubColor, val bgPct: Int)
+
+    private val _subStyle = MutableStateFlow(
+        SubStyle(com.loltube.app.data.SubSize.NORMAL.pct, com.loltube.app.data.SubColor.WHITE, 55)
+    )
+    val subStyle: StateFlow<SubStyle> = _subStyle.asStateFlow()
+
     // ---- internals ---------------------------------------------------------
     private var settings: AppSettings = AppSettings()
     private var currentStream: ResolvedStream? = null
     private val resolver = StreamResolver(context)
     private val rebufferTimes = mutableListOf<Long>()
     private var autoReResolved = false
-    private var activeSubtitle: PlayerEngine.SubtitleSelection? = null
-    private var providerSubs: List<Wyzie.Sub> = emptyList()
+
+    // ---- site-style subtitle engine (see Subtitles.kt) ----
+    /** Parsed cues of the downloaded sidecar, rendered by our own overlay. */
+    @Volatile private var sidecarCues: List<Subtitles.Cue> = emptyList()
+    /** The listing entry the current sidecar came from. */
+    @Volatile private var sidecarSub: com.loltube.app.data.Wyzie.Sub? = null
+    /** Sticky language/display the user (or auto-pick) chose — survives source
+     *  switches and episode jumps, mirroring the sites' own "remember my
+     *  subtitle language" behavior. */
+    @Volatile private var desiredSubLang: String? = null
+    /** Explicit "Off" from the menu — stops auto re-attach until re-enabled. */
+    @Volatile private var userTurnedSubsOff = false
+
+    private var providerSubs: List<com.loltube.app.data.Wyzie.Sub> = emptyList()
     private var prefetcher: TurboPrefetcher? = null
 
     // stall watchdog state
@@ -149,7 +177,6 @@ class PlayerViewModel(
     // of clean playback.
     @Volatile private var recoveryStage = 0
     @Volatile private var cleanSinceMs = 0L
-    @Volatile private var preAttachTried = false
 
     /** Providers that hard-failed during THIS playback session. */
     private val failedProviders = mutableSetOf<ProviderId>()
@@ -274,10 +301,12 @@ class PlayerViewModel(
             // "switching source" loops: drop the sidecar, rebuild, continue.
             val errorText = generateSequence<Throwable>(error as Throwable) { it.cause }
                 .joinToString(" <- ") { "${it.javaClass.simpleName}: ${it.message}" }
-            if (errorText.contains("Malformed URL", ignoreCase = true) && activeSubtitle != null) {
+            if (errorText.contains("Malformed URL", ignoreCase = true) && sidecarSub != null) {
                 _message.value = "Subtitle sidecar failed to load — restarting without it…"
                 AppLog.e("Recovery", "Malformed-URL error with a sidecar attached — dropping subtitle and rebuilding")
-                activeSubtitle = null
+                sidecarSub = null
+                sidecarCues = emptyList()
+                _cueText.value = null
                 _activeSubLabel.value = null
                 recoveryStage = 2
                 rebuildAtPosition(capHeight = null, safeMode = false)
@@ -434,25 +463,30 @@ class PlayerViewModel(
     private var lastBandwidthSaveMs = 0L
     private var embeddedAutoTried = false
 
-    /** Auto-pick a preferred embedded subtitle track once the manifest exposes them. */
+    /** Auto-pick a preferred subtitle track once the manifest exposes them.
+     *
+     *  Only a fallback: real embedded manifest tracks (rare on these CDNs)
+     *  or the case where no sidecar could be downloaded. When our own overlay
+     *  is already showing a downloaded sidecar, embedded selection is left to
+     *  the user. (The previous version *nulled the active sidecar here* — that
+     *  is what silently turned subtitles off after every source change.) */
     private fun maybeAutoSelectEmbedded() {
         if (embeddedAutoTried) return
+        if (sidecarCues.isNotEmpty()) {
+            embeddedAutoTried = true // sidecar overlay is active — nothing to do
+            return
+        }
         val embedded = _embeddedTextTracks.value
         if (embedded.isEmpty()) return
         if (!settings.subtitlesEnabled) return
+        if (userTurnedSubsOff) return
         val pref = settings.preferredSubtitleLang.lowercase()
         val pick = embedded.firstOrNull { it.language?.lowercase()?.startsWith(pref) == true }
             ?: embedded.firstOrNull {
                 it.language?.lowercase() == "en" || it.label.contains("english", true)
             } ?: return
         embeddedAutoTried = true
-        // The stream's OWN subtitle track always wins over a sidecar file that
-        // was pre-attached before we knew the manifest carried subtitles —
-        // same policy as the sites' own players (vidfast/vidcore render their
-        // manifest/harvested tracks natively).
-        activeSubtitle = null
         if (!pick.isSelected) selectEmbeddedSub(pick.groupIndex, pick.trackIndex)
-        _activeSubLabel.value = pick.label
         AppLog.d("Subs", "auto-selected the stream's embedded subtitle: ${pick.label}")
     }
 
@@ -461,6 +495,11 @@ class PlayerViewModel(
             settings = SettingsStore.read(context)
             _qualityMode.value = settings.quality
             _aspectMode.value = settings.aspect
+            _subStyle.value = SubStyle(
+                sizePct = settings.subtitleSize.pct,
+                color = settings.subtitleColor,
+                bgPct = settings.subtitleBgPct,
+            )
 
             val meta = Cinemeta.metaAnyType(request.imdbId, request.type)
             _details.value = meta
@@ -513,33 +552,47 @@ class PlayerViewModel(
      * ([_subs], filled by the fallback) is only used when that was empty.
      */
     private suspend fun preAttachSubtitle() {
-        if (preAttachTried) return
         if (!settings.subtitlesEnabled) return
-        if (activeSubtitle != null || _activeSubLabel.value != null) return
+        if (userTurnedSubsOff) return
+        if (sidecarCues.isNotEmpty()) return
         val pool = providerSubs.ifEmpty { _subs.value }
-        if (pool.isEmpty()) return // tried-flag stays false: a later listing can still attach
+        if (pool.isEmpty()) return // nothing to pick from yet; a later listing can still attach
 
-        val pref = settings.preferredSubtitleLang.lowercase()
+        val pref = (desiredSubLang ?: settings.preferredSubtitleLang).lowercase()
         val pick = pool.firstOrNull { s -> s.language?.lowercase()?.startsWith(pref) == true }
             ?: pool.firstOrNull { s -> s.display.lowercase().startsWith(pref) }
             ?: pool.firstOrNull { s ->
                 s.language?.lowercase() == "en" || s.display.contains("english", true)
             }
             ?: return
-        preAttachTried = true // genuinely attempting a download now
+        attachSubtitleCues(pick)
+    }
 
-        val dl = kotlinx.coroutines.withTimeoutOrNull(4_000) { Wyzie.download(pick) }
+    /** Download, parse and arm a subtitle for the overlay. Returns success. */
+    private suspend fun attachSubtitleCues(sub: Wyzie.Sub): Boolean {
+        val dl = kotlinx.coroutines.withTimeoutOrNull(6_000) { Wyzie.download(sub) }
         if (dl == null) {
-            AppLog.d("Subs", "pre-attach download failed/timed out (${pick.display}) — menu selection stays available")
-            preAttachTried = false // allow a later episode to retry
-            return
+            AppLog.d("Subs", "download failed/timed out (${sub.display}) — menu selection stays available")
+            return false
         }
-        activeSubtitle = PlayerEngine.SubtitleSelection(
-            file = dl.first, mime = dl.second,
-            language = pick.language, label = pick.display,
+        val cues = runCatching { Subtitles.parse(dl.first.readText()) }.getOrDefault(emptyList())
+        if (cues.isEmpty()) {
+            AppLog.d("Subs", "parsed 0 cues from \"${sub.display}\" — not arming")
+            return false
+        }
+        sidecarSub = sub
+        sidecarCues = cues
+        desiredSubLang = sub.language ?: sub.display
+        userTurnedSubsOff = false
+        _activeSubLabel.value = sub.display
+        currentStream?.let {
+            _subDelayMs.value = settings.subDelayByProvider[it.provider] ?: 0
+        }
+        AppLog.d(
+            "Subs",
+            "overlay subtitle \"${sub.display}\" armed: ${cues.size} cues, sync=${_subDelayMs.value}ms for ${currentStream?.provider?.label ?: "?"}",
         )
-        _activeSubLabel.value = pick.display
-        AppLog.d("Subs", "pre-attached \"${pick.display}\" before first prepare")
+        return true
     }
 
     /** Full cause-chain + stack logging so the next log.txt shows root causes. */
@@ -627,13 +680,18 @@ class PlayerViewModel(
 
             // Site-native subtitle listing came back empty (mapple, or a page
             // whose /wyzie call failed): fall back to the shared subtitle index
-            // so the menu still offers tracks. Log it honestly.
+            // so the menu still offers tracks — and try to auto-attach the
+            // preferred language from it too (subtitles must not require a
+            // manual menu visit after every source change).
             if (providerSubs.isEmpty()) {
                 viewModelScope.launch {
                     val wyzieSubs = Wyzie.fetch(req.imdbId, req.season, req.episode)
                     if (wyzieSubs.isNotEmpty()) {
                         mergeSubs(wyzieSubs)
                         AppLog.d("Subs", "site listing empty — subtitle-API fallback: ${wyzieSubs.size} track(s)")
+                        if (sidecarCues.isEmpty() && !userTurnedSubsOff) {
+                            kotlinx.coroutines.withTimeoutOrNull(4_000) { preAttachSubtitle() }
+                        }
                     }
                 }
             }
@@ -649,9 +707,13 @@ class PlayerViewModel(
             // whose codec list itself already says no.
             probeLadder(stream)
 
-            // ship the preferred subtitle with the FIRST media item (no
-            // mid-playback restart later)
-            if (activeSubtitle == null) {
+            // Re-arm the subtitle auto-attach for the NEW stream: the sticky
+            // language (or the previously parsed sidecar of the same title)
+            // carries over — subtitles stay ON across source switches, only
+            // the per-source sync delay changes.
+            embeddedAutoTried = false
+            _subDelayMs.value = settings.subDelayByProvider[stream.provider] ?: 0
+            if (sidecarCues.isEmpty()) {
                 kotlinx.coroutines.withTimeoutOrNull(4_000) { preAttachSubtitle() }
             }
 
@@ -679,7 +741,7 @@ class PlayerViewModel(
             stallStage = 0
             switchingSource = false
 
-            val mediaItem = PlayerEngine.buildMediaItem(stream.url, stream.kind, null, activeSubtitle)
+            val mediaItem = PlayerEngine.buildMediaItem(stream.url, stream.kind, null)
             p.setMediaItem(mediaItem, if (req.startAtMs > 0) req.startAtMs else 0)
             p.prepare()
             p.playWhenReady = true
@@ -741,7 +803,7 @@ class PlayerViewModel(
         prefetcher = built.prefetcher
         PlayerEngine.applyQualityMode(built.player, _qualityMode.value, sessionDecoderCap ?: capHeight)
 
-        val mediaItem = PlayerEngine.buildMediaItem(stream.url, stream.kind, null, activeSubtitle)
+        val mediaItem = PlayerEngine.buildMediaItem(stream.url, stream.kind, null)
         built.player.setMediaItem(mediaItem, pos)
         built.player.prepare()
         built.player.playWhenReady = true
@@ -750,27 +812,41 @@ class PlayerViewModel(
     // ---- stall watchdog -------------------------------------------------------
     //
     // If playback keeps buffering for a long stretch the ladder is:
-    //   1) cap quality to 1080p (survives slow lines),
-    //   2) re-prepare the stream (recovers dead loaders),
+    //   1) re-prepare the stream (recovers dead loaders),
+    //   2) re-prepare again,
     //   3) silently switch to the next provider at the same position.
     // Each step re-arms the timer; any recovery (STATE_READY) resets it.
+    //
+    // IMPORTANT: in 4K-lock mode the watchdog NEVER silently lowers the
+    // visual quality — the user's whole point is "play 4K, don't change what I
+    // see". The old stage-0 auto-cap to 1080p is exactly the invisible quality
+    // drop that made "no matter what I set, it looks the same". Only the AUTO
+    // (adaptive) mode may still trade quality for smoothness — that's its job.
 
     private fun checkStallWatchdog() {
         val since = bufferingSinceMs
         if (since == 0L) return
         val now = android.os.SystemClock.elapsedRealtime()
         val stalledFor = now - since
-        val stage0Timeout = if (hadFirstReady) 12_000L else 20_000L
+        val locked = _qualityMode.value == QualityMode.MAX
+        val stage0Timeout = when {
+            locked -> 25_000L // locked 4K: hold quality, be patient (flywheel catches up)
+            hadFirstReady -> 12_000L
+            else -> 20_000L
+        }
 
         when {
             stallStage == 0 && stalledFor > stage0Timeout -> {
                 bufferingSinceMs = now
                 stallStage = 1
-                if (_qualityMode.value == QualityMode.AUTO || _qualityMode.value == QualityMode.MAX) {
+                if (!locked && _qualityMode.value == QualityMode.AUTO) {
                     setQuality(QualityMode.CAP_1080)
                     _message.value = "Slow line detected — capped to 1080p for smooth playback"
                 } else {
-                    reprepareStream("Reconnecting stream…")
+                    reprepareStream(
+                        if (locked) "Holding 4K — reconnecting stream…"
+                        else "Reconnecting stream…"
+                    )
                 }
             }
 
@@ -844,6 +920,18 @@ class PlayerViewModel(
                 }
             }
         }
+        // Fast subtitle tick: the overlay must resolve cues at ~±0.1s
+        // precision, tighter than the 400ms position loop. Cheap: binary
+        // search over already-parsed cues, no allocation.
+        viewModelScope.launch {
+            while (true) {
+                delay(100)
+                val pl = player.value ?: continue
+                val cues = sidecarCues
+                _cueText.value = if (cues.isEmpty()) null
+                else Subtitles.activeCueAt(cues, pl.currentPosition.coerceAtLeast(0), _subDelayMs.value)?.text
+            }
+        }
         viewModelScope.launch {
             while (true) {
                 delay(5_000)
@@ -900,7 +988,9 @@ class PlayerViewModel(
         _qualityMode.value = mode
         val p = player.value ?: return
         PlayerEngine.applyQualityMode(p, mode, sessionDecoderCap)
-        // ABR stays fully adaptive in every mode; only the ceiling changes.
+        // Lock mode pins the top rendition via trackSelectionParameters (the
+        // switch is INSTANT — the very next segment comes from the new
+        // rendition, no reload); other modes return to adaptive selection.
         p.trackSelectionParameters = p.trackSelectionParameters.buildUpon()
             .clearOverridesOfType(C.TRACK_TYPE_VIDEO).build()
         viewModelScope.launch { SettingsStore.setQuality(context, mode) }
@@ -912,52 +1002,25 @@ class PlayerViewModel(
     }
 
     /**
-     * Attach a downloaded sidecar subtitle (manual selection from the menu).
-     * Sidecar files must ship with the MediaItem, so this restarts the media
-     * item at the current position — a user-triggered action, so a brief
-     * reload is acceptable. Everything is guarded: a failure here must never
-     * leave the player dead.
+     * Pick a downloaded sidecar subtitle from the menu. Instant: the overlay
+     * simply switches its cue list — the video stream is never restarted
+     * (the old implementation re-prepared the media item for this).
      */
     fun selectSubtitle(sub: Wyzie.Sub?) {
         if (sub == null) {
-            activeSubtitle = null
+            sidecarSub = null
+            sidecarCues = emptyList()
+            _cueText.value = null
             _activeSubLabel.value = null
+            userTurnedSubsOff = true // explicit Off — stay off across source switches
             disableAllTextTracks(player.value)
+            AppLog.d("Subs", "subtitles off (user)")
             return
         }
         viewModelScope.launch {
-            val dl = Wyzie.download(sub) ?: run {
+            if (!attachSubtitleCues(sub)) {
                 _message.value = "Couldn't download subtitle (${sub.display})"
-                return@launch
             }
-            val sel = PlayerEngine.SubtitleSelection(
-                file = dl.first, mime = dl.second,
-                language = sub.language, label = sub.display,
-            )
-            activeSubtitle = sel
-            _activeSubLabel.value = sub.display
-
-            val p = player.value
-            if (p != null) {
-                val stream = currentStream ?: return@launch
-                val pos = _positionMs.value
-                try {
-                    val mediaItem = PlayerEngine.buildMediaItem(stream.url, stream.kind, null, sel)
-                    p.setMediaItem(mediaItem, pos)
-                    p.prepare()
-                    p.playWhenReady = true
-                    p.trackSelectionParameters = p.trackSelectionParameters.buildUpon()
-                        .clearOverridesOfType(C.TRACK_TYPE_TEXT)
-                        .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, false)
-                        .setPreferredTextLanguage(sub.language ?: sub.display)
-                        .build()
-                    recoveryStage = 0 // fresh media item re-arms the ladder
-                } catch (t: Throwable) {
-                    AppLog.e("Subs", "subtitle attach failed (kept playing)", t)
-                    _message.value = "Subtitle attached for next start"
-                }
-            }
-            // player == null: startResolve picks activeSubtitle up when it builds
         }
     }
 
@@ -968,7 +1031,10 @@ class PlayerViewModel(
         if (groupIndex >= tracks.groups.size) return
         val group = tracks.groups[groupIndex]
         if (trackIndex >= group.length) return
-        activeSubtitle = null // external sidecar off
+        sidecarSub = null // overlay off — the PlayerView renders embedded tracks
+        sidecarCues = emptyList()
+        _cueText.value = null
+        userTurnedSubsOff = false
         val fmt = group.getTrackFormat(trackIndex)
         _activeSubLabel.value = fmt.label ?: fmt.language ?: "Embedded"
         p.trackSelectionParameters = p.trackSelectionParameters.buildUpon()
@@ -976,6 +1042,46 @@ class PlayerViewModel(
             .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, false)
             .setOverrideForType(TrackSelectionOverride(group.mediaTrackGroup, trackIndex))
             .build()
+    }
+
+    /**
+     * Nudge the per-source subtitle sync delay (ms). Positive = subtitles
+     * appear LATER (the fix when they run ahead of the audio); negative =
+     * earlier. Applied instantly — a pure display-side shift, exactly like
+     * the sites' own timing adjusters (mapple's timingAdjustment, vidfast's
+     * subtitle offset) — and persisted PER PROVIDER, because each source's
+     * video copy is trimmed differently (2–6s drift depending on source).
+     */
+    fun nudgeSubDelay(deltaMs: Int) {
+        val next = (_subDelayMs.value + deltaMs).coerceIn(-30_000, 30_000)
+        _subDelayMs.value = next
+        _cueText.value = Subtitles.activeCueAt(sidecarCues, _positionMs.value, next)?.text
+        val provider = currentStream?.provider ?: return
+        viewModelScope.launch { SettingsStore.setSubDelayFor(context, provider, next) }
+        AppLog.d("Subs", "sync delay for ${provider.label} -> ${next}ms")
+    }
+
+    fun resetSubDelay() {
+        _subDelayMs.value = 0
+        _cueText.value = Subtitles.activeCueAt(sidecarCues, _positionMs.value, 0)?.text
+        val provider = currentStream?.provider ?: return
+        viewModelScope.launch { SettingsStore.setSubDelayFor(context, provider, 0) }
+        AppLog.d("Subs", "sync delay for ${provider.label} -> reset")
+    }
+
+    /** Re-read settings (subtitle appearance may have changed in Settings). */
+    fun refreshSubStyle() {
+        viewModelScope.launch {
+            settings = SettingsStore.read(context)
+            _subStyle.value = SubStyle(
+                sizePct = settings.subtitleSize.pct,
+                color = settings.subtitleColor,
+                bgPct = settings.subtitleBgPct,
+            )
+            currentStream?.let {
+                _subDelayMs.value = settings.subDelayByProvider[it.provider] ?: 0
+            }
+        }
     }
 
     private fun disableAllTextTracks(p: ExoPlayer?) {
@@ -1015,7 +1121,6 @@ class PlayerViewModel(
         val req = currentRequest.copy(season = season, episode = episode, startAtMs = 0)
         autoReResolved = false
         embeddedAutoTried = false
-        preAttachTried = false
         recoveryStage = 0
         cleanSinceMs = 0
         synchronized(rebufferTimes) { rebufferTimes.clear() }
@@ -1027,7 +1132,12 @@ class PlayerViewModel(
         _subs.value = emptyList()
         providerSubs = emptyList()
         _activeSubLabel.value = null
-        activeSubtitle = null
+        // new episode = fresh subtitle file (its timing is episode-specific);
+        // the sticky LANGUAGE stays so the same language auto-attaches.
+        sidecarSub = null
+        sidecarCues = emptyList()
+        _cueText.value = null
+        userTurnedSubsOff = false
         _embeddedTextTracks.value = emptyList()
         _message.value = "Loading S$season E$episode…"
         currentRequest = req

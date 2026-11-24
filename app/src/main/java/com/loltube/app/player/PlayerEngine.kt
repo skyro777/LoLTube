@@ -214,10 +214,18 @@ object PlayerEngine {
     }
 
     /**
-     * Applies a quality mode. All modes stay adaptive (the old "force highest
-     * bitrate" flag disabled ABR entirely and guaranteed rebuffering); the
-     * difference is only how high the selection is allowed to climb. Capped
-     * modes also rewrite the master playlist via [CapPolicy].
+     * Applies a quality mode.
+     *
+     *  - LOCK (MAX): a REAL lock — [setForceHighestSupportedBitrate] pins the
+     *    selection to the top rendition the codecs support, regardless of what
+     *    the ABR bandwidth estimate happens to be. This is what brings 4K
+     *    *instantly*: the top variant starts playing from the first segment,
+     *    and switching the setting mid-playback re-selects the track on the
+     *    spot (no reload). The old code only raised a *ceiling* and let ABR
+     *    decide — on a 25–30 Mbps line the 16.2 Mbps 2160p variant never won,
+     *    so "prefer 4K" silently played 1080p and looked soft/"crunched".
+     *  - AUTO: fully adaptive up to 4K (ceiling only).
+     *  - CAP_*: ceiling + master-playlist rewriting via [CapPolicy].
      *
      * [maxHeightOverride] is the decoder-safety ceiling computed by
      * [probeLadder] / the recovery ladder: 4K is attempted whenever the
@@ -232,6 +240,9 @@ object PlayerEngine {
         }
         val effective = maxHeightOverride?.let { minOf(it, ceiling) } ?: ceiling
         val params = player.trackSelectionParameters.buildUpon()
+        // The lock: force the highest supported rendition within the constraints
+        // (must be set to false explicitly in the other modes — parameters persist).
+        params.setForceHighestSupportedBitrate(mode == QualityMode.MAX)
         when (mode) {
             QualityMode.AUTO, QualityMode.MAX -> params.setMaxVideoSize(3840, effective)
             QualityMode.CAP_1080 -> params.setMaxVideoSize(1920, effective)
@@ -239,7 +250,13 @@ object PlayerEngine {
         }
         player.trackSelectionParameters = params.build()
         CapPolicy.maxVideoHeight = effective
-        AppLog.d("Player", "quality mode -> $mode (ceiling ${ceiling}p -> effective ${effective}p)")
+        AppLog.d(
+            "Player",
+            if (mode == QualityMode.MAX)
+                "4K LOCK engaged -> top rendition pinned (ceiling ${ceiling}p -> effective ${effective}p)"
+            else
+                "quality mode -> $mode (ceiling ${ceiling}p -> effective ${effective}p)"
+        )
     }
 
     /** True if a 4K hardware decoder exists for HEVC/AVC at 3840x2160@30. */
