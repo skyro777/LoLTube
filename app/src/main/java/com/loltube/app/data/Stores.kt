@@ -17,8 +17,8 @@ private val Context.settingsStore by preferencesDataStore(name = "loltube_settin
 private val Context.progressStore by preferencesDataStore(name = "loltube_progress")
 
 enum class QualityMode(val label: String) {
-    AUTO("Auto (adaptive, up to 4K)"),
-    MAX("Prefer 4K (adaptive, needs fast line)"),
+    AUTO("Auto — adaptive, up to 4K"),
+    MAX("4K lock — always top rendition (2160p)"),
     CAP_1080("Cap at 1080p (smoothest HD)"),
     CAP_720("Cap at 720p (slow lines)");
 
@@ -39,7 +39,20 @@ enum class AspectMode(val label: String) {
     ZOOM("Zoom — fill screen, crop edges"),
 }
 
+/** Subtitle text color choices — same palette the sites' players offer. */
+enum class SubColor(val label: String) {
+    WHITE("White"), YELLOW("Yellow"), CYAN("Cyan"), SILVER("Silver");
+}
+
+/** Subtitle text size, % of the player-appropriate base. */
+enum class SubSize(val label: String, val pct: Int) {
+    SMALL("Small", 80), NORMAL("Normal", 100), LARGE("Large", 125), XL("Extra large", 150);
+}
+
 enum class BufferProfile(val label: String, val minMs: Int, val maxMs: Int, val playbackMs: Int, val rebufferMs: Int, val backMs: Int) {
+    // Buffer profiles never change WHAT you see (4K stays 4K in all of them —
+    // with the 4K lock the visual quality is identical); they only change how
+    // much is buffered ahead in RAM/disk to keep it stutter-free.
     SMOOTH("Smooth 4K (30–90s buffer)", 30_000, 90_000, 5_000, 10_000, 30_000),
     DEEP("Deep 4K (45–120s buffer)", 45_000, 120_000, 5_000, 12_000, 30_000),
     BALANCED("Balanced (20–60s buffer)", 20_000, 60_000, 3_000, 5_000, 10_000),
@@ -58,7 +71,17 @@ data class AppSettings(
     val lastBandwidthBps: Int = 0,
     /** Parallel segment read-ahead into the disk cache (the "no buffering" engine). */
     val turboPrefetch: Boolean = true,
-)
+    // ---- subtitle appearance (rendered by the app's own overlay) ----
+    /** Subtitle text size. Base is noticeably smaller than the old built-in renderer. */
+    val subtitleSize: SubSize = SubSize.NORMAL,
+    val subtitleColor: SubColor = SubColor.WHITE,
+    /** Subtitle background opacity %, 0 = no background plate. */
+    val subtitleBgPct: Int = 55,
+    /** Per-source subtitle sync delay (ms; >0 = subtitles appear later).
+     *  Each source's video copy is trimmed differently, so the offset that
+     *  fixes one source is wrong for another — that's why it's per-provider. */
+    val subDelayByProvider: Map<ProviderId, Int> = emptyMap(),
+}
 
 object SettingsStore {
     private val KEY_PROVIDER_ORDER = stringPreferencesKey("provider_order")
@@ -70,6 +93,10 @@ object SettingsStore {
     private val KEY_SUBS_ENABLED = booleanPreferencesKey("subtitles_enabled")
     private val KEY_LAST_BITRATE = intPreferencesKey("last_bandwidth_bps")
     private val KEY_TURBO = booleanPreferencesKey("turbo_prefetch")
+    private val KEY_SUB_SIZE = stringPreferencesKey("subtitle_size")
+    private val KEY_SUB_COLOR = stringPreferencesKey("subtitle_color")
+    private val KEY_SUB_BG = intPreferencesKey("subtitle_bg_pct")
+    private val KEY_SUB_DELAYS = stringPreferencesKey("sub_delay_by_provider")
 
     /** The old shipped default order — silently migrated to the new Vidcore-first order. */
     private val LEGACY_DEFAULT_ORDER = listOf(ProviderId.VIDFAST, ProviderId.VIDCORE, ProviderId.MAPPLE)
@@ -85,6 +112,10 @@ object SettingsStore {
             subtitlesEnabled = p[KEY_SUBS_ENABLED] ?: true,
             lastBandwidthBps = p[KEY_LAST_BITRATE] ?: 0,
             turboPrefetch = p[KEY_TURBO] ?: true,
+            subtitleSize = enumOr(p[KEY_SUB_SIZE], SubSize.NORMAL),
+            subtitleColor = enumOr(p[KEY_SUB_COLOR], SubColor.WHITE),
+            subtitleBgPct = (p[KEY_SUB_BG] ?: 55).coerceIn(0, 100),
+            subDelayByProvider = parseDelays(p[KEY_SUB_DELAYS]),
         )
     }
 
@@ -126,6 +157,38 @@ object SettingsStore {
 
     suspend fun setTurboPrefetch(context: Context, v: Boolean) {
         context.settingsStore.edit { it[KEY_TURBO] = v }
+    }
+
+    suspend fun setSubtitleSize(context: Context, v: SubSize) {
+        context.settingsStore.edit { it[KEY_SUB_SIZE] = v.name }
+    }
+
+    suspend fun setSubtitleColor(context: Context, v: SubColor) {
+        context.settingsStore.edit { it[KEY_SUB_COLOR] = v.name }
+    }
+
+    suspend fun setSubtitleBgPct(context: Context, v: Int) {
+        context.settingsStore.edit { it[KEY_SUB_BG] = v.coerceIn(0, 100) }
+    }
+
+    /** Persist the sync delay for ONE provider (VIDCORE=2500,MAPPLE=-1000,…). */
+    suspend fun setSubDelayFor(context: Context, provider: ProviderId, delayMs: Int) {
+        context.settingsStore.edit { p ->
+            val cur = parseDelays(p[KEY_SUB_DELAYS]).toMutableMap()
+            cur[provider] = delayMs
+            p[KEY_SUB_DELAYS] = cur.entries.joinToString(",") { "${it.key.name}=${it.value}" }
+        }
+    }
+
+    private fun parseDelays(raw: String?): Map<ProviderId, Int> {
+        if (raw.isNullOrBlank()) return emptyMap()
+        return raw.split(',').mapNotNull { entry ->
+            val idx = entry.indexOf('=')
+            if (idx <= 0) return@mapNotNull null
+            val id = ProviderId.entries.firstOrNull { it.name == entry.take(idx).trim() } ?: return@mapNotNull null
+            val ms = entry.substring(idx + 1).trim().toIntOrNull() ?: return@mapNotNull null
+            id to ms
+        }.toMap()
     }
 
     private fun parseProviders(raw: String?): List<ProviderId> {
