@@ -26,6 +26,7 @@ import androidx.compose.material.icons.filled.ArrowDownward
 import androidx.compose.material.icons.filled.ArrowUpward
 import androidx.compose.material.icons.filled.BugReport
 import androidx.compose.material.icons.filled.ContentCopy
+import androidx.compose.material.icons.filled.DeleteSweep
 import androidx.compose.material.icons.filled.PlaylistPlay
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.Storage
@@ -36,12 +37,15 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -66,7 +70,11 @@ import com.loltube.app.data.SettingsStore
 import com.loltube.app.data.SubColor
 import com.loltube.app.data.SubSize
 import com.loltube.app.providers.ProviderId
+import com.loltube.app.util.StorageJanitor
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import kotlin.math.roundToInt
 
 private val SUB_LANGUAGES = listOf(
     "en" to "English", "es" to "Spanish", "fr" to "French", "de" to "German",
@@ -130,23 +138,33 @@ fun SettingsScreen(onBack: () -> Unit, onOpenLogs: () -> Unit) {
                             scope.launch { SettingsStore.setAspect(context, mode) }
                         }
                     }
+
+                    // ---- manual stretch (works on top of any mode) ----
+                    CardSubHeader("Manual stretch")
+                    CardDescription(
+                        "For movies that keep black bars even in Auto (the bars are " +
+                            "burned into the picture — no player can auto-detect that) and " +
+                            "screens that need sideways stretch. Applies on top of the mode above."
+                    )
+                    StretchSlider(
+                        label = "Vertical stretch",
+                        value = settings.stretchYPct,
+                    ) { v -> scope.launch { SettingsStore.setStretchY(context, v) } }
+                    StretchSlider(
+                        label = "Horizontal stretch",
+                        value = settings.stretchXPct,
+                    ) { v -> scope.launch { SettingsStore.setStretchX(context, v) } }
+
                     CardSubHeader("Buffer profile (4K smoothness)")
                     CardDescription(
-                        "Bigger buffers absorb network dips at the cost of memory. Use Smooth on devices with 2GB+ RAM."
+                        "Deep 4K is recommended — it spends more RAM so 4K plays without " +
+                            "buffering (ideal on 2GB+ RAM devices). Balanced/Low memory for low-RAM devices."
                     )
                     BufferProfile.entries.forEach { profile ->
                         OptionRow(profile.label, settings.bufferProfile == profile) {
                             scope.launch { SettingsStore.setBufferProfile(context, profile) }
                         }
                     }
-                    CardSubHeader("Turbo download-ahead")
-                    CardDescription(
-                        "Downloads the next ~90 seconds of the video in parallel (3 connections) into the on-device cache while you watch, so slow servers never stall playback. Recommended ON."
-                    )
-                    ToggleRow(
-                        "Turbo prefetch (no-buffer engine)",
-                        settings.turboPrefetch,
-                    ) { v -> scope.launch { SettingsStore.setTurboPrefetch(context, v) } }
                 }
             }
 
@@ -264,37 +282,62 @@ fun SettingsScreen(onBack: () -> Unit, onOpenLogs: () -> Unit) {
                 SettingsCard(title = "Subtitle sync", icon = Icons.Filled.Timer) {
                     CardDescription(
                         "Each source's video copy is trimmed differently, so one subtitle file can run " +
-                            "2–6s early or late depending on the source. Set the offset per source once — " +
-                            "it sticks. (The fastest way: the Sync button while playing.)"
+                            "far ahead or behind depending on the source. Drag the slider (±60 seconds, " +
+                            "millisecond precision) or use the fine buttons — the offset sticks per source. " +
+                            "(The fastest way: the Sync button while playing.)"
                     )
                     Spacer(Modifier.height(4.dp))
                     ProviderId.entries.forEach { p ->
                         val delay = settings.subDelayByProvider[p] ?: 0
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp),
-                        ) {
-                            Text(
-                                p.label,
-                                style = MaterialTheme.typography.bodyMedium,
-                                fontWeight = FontWeight.SemiBold,
-                                modifier = Modifier.weight(1f),
+                        Column(Modifier.padding(horizontal = 16.dp, vertical = 8.dp)) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Text(
+                                    p.label,
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    fontWeight = FontWeight.SemiBold,
+                                    modifier = Modifier.weight(1f),
+                                )
+                                Text(
+                                    formatDelay(delay),
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    fontWeight = FontWeight.Bold,
+                                    color = if (delay != 0) MaterialTheme.colorScheme.primary
+                                    else MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                            var local by remember(delay) { mutableFloatStateOf(delay / 1000f) }
+                            Slider(
+                                value = local,
+                                onValueChange = { local = it },
+                                onValueChangeFinished = {
+                                    scope.launch {
+                                        SettingsStore.setSubDelayFor(context, p, (local * 1000f).roundToInt())
+                                    }
+                                },
+                                valueRange = -60f..60f,
                             )
-                            IconButton(onClick = {
-                                scope.launch { SettingsStore.setSubDelayFor(context, p, delay - 250) }
-                            }) { Text("−", fontWeight = FontWeight.Bold) }
-                            Text(
-                                formatDelay(delay),
-                                style = MaterialTheme.typography.bodyMedium,
-                                color = if (delay != 0) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
-                                modifier = Modifier.padding(horizontal = 4.dp),
-                            )
-                            IconButton(onClick = {
-                                scope.launch { SettingsStore.setSubDelayFor(context, p, delay + 250) }
-                            }) { Text("+", fontWeight = FontWeight.Bold) }
+                            Row(
+                                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            ) {
+                                listOf(-5_000, -1_000, -100).forEach { d ->
+                                    OutlinedButton(onClick = {
+                                        scope.launch { SettingsStore.setSubDelayFor(context, p, delay + d) }
+                                    }) { Text("−${absSec(d)}s") }
+                                }
+                                OutlinedButton(onClick = {
+                                    scope.launch { SettingsStore.setSubDelayFor(context, p, 0) }
+                                }) { Text("0") }
+                                listOf(100, 1_000, 5_000).forEach { d ->
+                                    OutlinedButton(onClick = {
+                                        scope.launch { SettingsStore.setSubDelayFor(context, p, delay + d) }
+                                    }) { Text("+${absSec(d)}s") }
+                                }
+                            }
                         }
                     }
-                    CardDescription("− = subtitles earlier · + = subtitles later")
+                    CardDescription("− = subtitles earlier · + = subtitles later · range ±60s")
                 }
             }
 
@@ -369,6 +412,63 @@ fun SettingsScreen(onBack: () -> Unit, onOpenLogs: () -> Unit) {
                 }
             }
 
+            // ---- storage management ----
+            item {
+                SettingsCard(title = "Storage", icon = Icons.Filled.DeleteSweep) {
+                    var cacheBytes by remember { mutableStateOf<Long?>(null) }
+                    var clearing by remember { mutableStateOf(false) }
+                    var freedNote by remember { mutableStateOf<String?>(null) }
+                    LaunchedEffect(clearing) {
+                        cacheBytes = withContext(Dispatchers.IO) { StorageJanitor.usedBytes(context) }
+                    }
+                    CardDescription(
+                        "LoLTube uses the cache to run 4K smoothly while playing — nothing is " +
+                            "erased mid-playback. When the app closes (or on demand below) the video cache, " +
+                            "subtitle files, images and WebView data are erased, so storage never balloons " +
+                            "and every session starts fresh (that also fixes sources that stopped loading)."
+                    )
+                    Spacer(Modifier.height(4.dp))
+                    CardSubHeader("Currently on disk")
+                    Text(
+                        cacheBytes?.let { "${"%.0f".format(it / 1_000_000f)} MB of caches" } ?: "measuring…",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurface,
+                        modifier = Modifier.padding(horizontal = 16.dp),
+                    )
+                    Spacer(Modifier.height(6.dp))
+                    Row(Modifier.padding(horizontal = 16.dp, vertical = 6.dp)) {
+                        OutlinedButton(
+                            enabled = cacheBytes != null && !clearing,
+                            onClick = {
+                                clearing = true
+                                scope.launch {
+                                    val before = cacheBytes ?: 0L
+                                    withContext(Dispatchers.IO) { StorageJanitor.sweep(context) }
+                                    cacheBytes = withContext(Dispatchers.IO) { StorageJanitor.usedBytes(context) }
+                                    freedNote = "Cleared — freed ${"%.0f".format(before / 1_000_000f)} MB"
+                                    clearing = false
+                                }
+                            },
+                        ) {
+                            Text(if (clearing) "Clearing…" else "Clear caches now")
+                        }
+                    }
+                    freedNote?.let {
+                        Text(
+                            it,
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.padding(horizontal = 16.dp),
+                        )
+                    }
+                    Spacer(Modifier.height(4.dp))
+                    ToggleRow(
+                        "Auto-clean when app closes",
+                        settings.autoCleanOnExit,
+                    ) { v -> scope.launch { SettingsStore.setAutoCleanOnExit(context, v) } }
+                }
+            }
+
             // ---- diagnostics ----
             item {
                 SettingsCard(title = "Diagnostics", icon = Icons.Filled.BugReport) {
@@ -387,7 +487,7 @@ fun SettingsScreen(onBack: () -> Unit, onOpenLogs: () -> Unit) {
     }
 }
 
-/** "+2.5s" / "−1.0s" / "0s" for the per-source sync display. */
+/** "+2.35s" / "−1.00s" / "0s" for the per-source sync display (ms precision). */
 private fun formatDelay(ms: Int): String {
     val s = kotlin.math.abs(ms) / 1000f
     val sign = when {
@@ -395,7 +495,43 @@ private fun formatDelay(ms: Int): String {
         ms < 0 -> "−"
         else -> ""
     }
-    return "$sign${"%.1f".format(s)}s"
+    return "$sign${"%.2f".format(s)}s"
+}
+
+/** "5", "1", "0.1" — compact seconds for fine-adjust buttons. */
+private fun absSec(ms: Int): String {
+    val s = kotlin.math.abs(ms) / 1000f
+    return if (s >= 1) "%.0f".format(s) else "%.1f".format(s)
+}
+
+/**
+ * Manual-stretch slider row (100–160%), persisted on release. Works on top of
+ * the selected aspect mode: 100% leaves that mode untouched.
+ */
+@Composable
+private fun StretchSlider(
+    label: String,
+    value: Int,
+    onCommit: (Int) -> Unit,
+) {
+    Column(Modifier.padding(horizontal = 16.dp, vertical = 6.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(label, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f))
+            Text(
+                if (value == 100) "100% (off)" else "$value%",
+                style = MaterialTheme.typography.bodyMedium,
+                fontWeight = FontWeight.Bold,
+                color = if (value != 100) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        var local by remember(value) { mutableFloatStateOf(value.toFloat()) }
+        Slider(
+            value = local,
+            onValueChange = { local = it },
+            onValueChangeFinished = { onCommit(local.roundToInt()) },
+            valueRange = 100f..160f,
+        )
+    }
 }
 
 /** Rounded card grouping related settings under a bold header with an amber icon. */

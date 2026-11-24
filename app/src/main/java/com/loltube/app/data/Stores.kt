@@ -53,8 +53,8 @@ enum class BufferProfile(val label: String, val minMs: Int, val maxMs: Int, val 
     // Buffer profiles never change WHAT you see (4K stays 4K in all of them —
     // with the 4K lock the visual quality is identical); they only change how
     // much is buffered ahead in RAM/disk to keep it stutter-free.
+    DEEP("Deep 4K (45–120s buffer) — recommended", 45_000, 120_000, 5_000, 12_000, 30_000),
     SMOOTH("Smooth 4K (30–90s buffer)", 30_000, 90_000, 5_000, 10_000, 30_000),
-    DEEP("Deep 4K (45–120s buffer)", 45_000, 120_000, 5_000, 12_000, 30_000),
     BALANCED("Balanced (20–60s buffer)", 20_000, 60_000, 3_000, 5_000, 10_000),
     LOW_MEM("Low memory (10–30s buffer)", 10_000, 30_000, 2_000, 3_000, 5_000),
 }
@@ -64,13 +64,13 @@ data class AppSettings(
     val providerOrder: List<ProviderId> = listOf(ProviderId.VIDCORE, ProviderId.VIDFAST, ProviderId.MAPPLE),
     val quality: QualityMode = QualityMode.AUTO,
     val aspect: AspectMode = AspectMode.AUTO,
-    val bufferProfile: BufferProfile = BufferProfile.SMOOTH,
+    // Deep 4K is the recommended default: it spends more RAM so 4K plays
+    // WITHOUT buffering (user-verified on a 25–30 Mbps line).
+    val bufferProfile: BufferProfile = BufferProfile.DEEP,
     val autoNextEpisode: Boolean = true,
     val preferredSubtitleLang: String = "en",
     val subtitlesEnabled: Boolean = true,
     val lastBandwidthBps: Int = 0,
-    /** Parallel segment read-ahead into the disk cache (the "no buffering" engine). */
-    val turboPrefetch: Boolean = true,
     // ---- subtitle appearance (rendered by the app's own overlay) ----
     /** Subtitle text size. Base is noticeably smaller than the old built-in renderer. */
     val subtitleSize: SubSize = SubSize.NORMAL,
@@ -81,6 +81,15 @@ data class AppSettings(
      *  Each source's video copy is trimmed differently, so the offset that
      *  fixes one source is wrong for another — that's why it's per-provider. */
     val subDelayByProvider: Map<ProviderId, Int> = emptyMap(),
+    // ---- manual stretch (multipliers on top of the aspect mode, %, 100 = off) ----
+    /** Extra vertical stretch — removes black bars baked INTO the video
+     *  (cinemascope transfers on 16:9 frames that auto-fill can't detect). */
+    val stretchYPct: Int = 100,
+    /** Extra horizontal stretch — for phones/screens with unusual ratios. */
+    val stretchXPct: Int = 100,
+    /** Erase the media cache, subtitle files, images and WebView data when the
+     *  app closes (nothing is deleted while playing). */
+    val autoCleanOnExit: Boolean = true,
 )
 
 object SettingsStore {
@@ -92,11 +101,13 @@ object SettingsStore {
     private val KEY_SUB_LANG = stringPreferencesKey("preferred_subtitle_lang")
     private val KEY_SUBS_ENABLED = booleanPreferencesKey("subtitles_enabled")
     private val KEY_LAST_BITRATE = intPreferencesKey("last_bandwidth_bps")
-    private val KEY_TURBO = booleanPreferencesKey("turbo_prefetch")
     private val KEY_SUB_SIZE = stringPreferencesKey("subtitle_size")
     private val KEY_SUB_COLOR = stringPreferencesKey("subtitle_color")
     private val KEY_SUB_BG = intPreferencesKey("subtitle_bg_pct")
     private val KEY_SUB_DELAYS = stringPreferencesKey("sub_delay_by_provider")
+    private val KEY_STRETCH_Y = intPreferencesKey("stretch_y_pct")
+    private val KEY_STRETCH_X = intPreferencesKey("stretch_x_pct")
+    private val KEY_AUTO_CLEAN = booleanPreferencesKey("auto_clean_on_exit")
 
     /** The old shipped default order — silently migrated to the new Vidcore-first order. */
     private val LEGACY_DEFAULT_ORDER = listOf(ProviderId.VIDFAST, ProviderId.VIDCORE, ProviderId.MAPPLE)
@@ -106,16 +117,18 @@ object SettingsStore {
             providerOrder = parseProviders(p[KEY_PROVIDER_ORDER]),
             quality = enumOr(QualityMode.migrate(p[KEY_QUALITY]), QualityMode.AUTO),
             aspect = enumOr(p[KEY_ASPECT], AspectMode.AUTO),
-            bufferProfile = enumOr(p[KEY_BUFFER], BufferProfile.SMOOTH),
+            bufferProfile = enumOr(p[KEY_BUFFER], BufferProfile.DEEP),
             autoNextEpisode = p[KEY_AUTO_NEXT] ?: true,
             preferredSubtitleLang = p[KEY_SUB_LANG] ?: "en",
             subtitlesEnabled = p[KEY_SUBS_ENABLED] ?: true,
             lastBandwidthBps = p[KEY_LAST_BITRATE] ?: 0,
-            turboPrefetch = p[KEY_TURBO] ?: true,
             subtitleSize = enumOr(p[KEY_SUB_SIZE], SubSize.NORMAL),
             subtitleColor = enumOr(p[KEY_SUB_COLOR], SubColor.WHITE),
             subtitleBgPct = (p[KEY_SUB_BG] ?: 55).coerceIn(0, 100),
             subDelayByProvider = parseDelays(p[KEY_SUB_DELAYS]),
+            stretchYPct = (p[KEY_STRETCH_Y] ?: 100).coerceIn(100, 160),
+            stretchXPct = (p[KEY_STRETCH_X] ?: 100).coerceIn(100, 160),
+            autoCleanOnExit = p[KEY_AUTO_CLEAN] ?: true,
         )
     }
 
@@ -155,8 +168,16 @@ object SettingsStore {
         context.settingsStore.edit { it[KEY_LAST_BITRATE] = bps }
     }
 
-    suspend fun setTurboPrefetch(context: Context, v: Boolean) {
-        context.settingsStore.edit { it[KEY_TURBO] = v }
+    suspend fun setStretchY(context: Context, v: Int) {
+        context.settingsStore.edit { it[KEY_STRETCH_Y] = v.coerceIn(100, 160) }
+    }
+
+    suspend fun setStretchX(context: Context, v: Int) {
+        context.settingsStore.edit { it[KEY_STRETCH_X] = v.coerceIn(100, 160) }
+    }
+
+    suspend fun setAutoCleanOnExit(context: Context, v: Boolean) {
+        context.settingsStore.edit { it[KEY_AUTO_CLEAN] = v }
     }
 
     suspend fun setSubtitleSize(context: Context, v: SubSize) {
@@ -171,11 +192,13 @@ object SettingsStore {
         context.settingsStore.edit { it[KEY_SUB_BG] = v.coerceIn(0, 100) }
     }
 
-    /** Persist the sync delay for ONE provider (VIDCORE=2500,MAPPLE=-1000,…). */
+    /** Persist the sync delay for ONE provider (VIDCORE=2500,MAPPLE=-1000,…).
+     *  Range ±60s with millisecond steps. */
     suspend fun setSubDelayFor(context: Context, provider: ProviderId, delayMs: Int) {
+        val clamped = delayMs.coerceIn(-60_000, 60_000)
         context.settingsStore.edit { p ->
             val cur = parseDelays(p[KEY_SUB_DELAYS]).toMutableMap()
-            cur[provider] = delayMs
+            cur[provider] = clamped
             p[KEY_SUB_DELAYS] = cur.entries.joinToString(",") { "${it.key.name}=${it.value}" }
         }
     }
