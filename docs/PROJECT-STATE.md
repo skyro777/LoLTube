@@ -5,21 +5,47 @@ Repo: https://github.com/skyro777/LoLTube · builds ONLY via GitHub Actions (`.g
 
 ## Current version
 
-- **v0.10.0 (versionCode 10)** — pushed this session. Watch release: `LoLTube-release.apk`.
+- **v0.11.0 (versionCode 11)** — pushed this session ("the series rescue"). Watch release: `LoLTube-release.apk`.
 - Stack: Kotlin 2.0 / Compose / Media3-ExoPlayer 1.4.1, minSdk 28 (Android 9), targetSdk 34.
-- Sources: vidfast.vc, vidcore.io (default first), mapple.fun. Catalog: Stremio Cinemeta (keyless).
+- Sources: vidfast.vc, vidcore.io, mapple.fun. Catalog: Stremio Cinemeta (keyless).
+- **Series routing order: Vidfast → Mapple → Vidcore** (vidcore demoted last for series; movies keep the saved providerOrder, default Vidcore-first).
 
 ## User-verified facts (do not regress)
 
-1. **True 4K WORKS on all 3 sources** — root cause of old stalls was turbo prefetch; REMOVED in v0.8. Never re-add parallel prefetch workers.
-2. **Playback engine (Deep 4K buffer profile + passive disk cache + 4K lock) is perfect — user said "don't change the buffer engine".** Keep untouched. v0.10 fixes are AROUND the engine (watchdog/recovery/settings), not inside it.
-3. **Site subtitles are perfectly timed at the sources**; the sites pair each stream copy with a specific SRT. v0.9's site-synced capture silently failed (see v0.10.0 §2) → user still saw wrong timelines on EVERY title regardless of source. v0.10 fixed both the capture AND added the deterministic site-algorithm pick.
+1. **True 4K WORKS on all 3 sources for MOVIES** — root cause of old stalls was turbo prefetch; REMOVED in v0.8. Never re-add parallel prefetch workers.
+2. **Playback engine (Deep 4K buffer profile + passive disk cache + 4K lock) is perfect — user said "don't change the buffer engine".** Keep untouched. v0.10/v0.11 fixes are AROUND the engine (watchdog/recovery/routing), not inside it.
+3. **Site subtitles are perfectly timed at the sources**; v0.10 site-synced capture + site-algorithm pick fixed movies. v0.11 adds ASS/SSA parsing (series English tracks are frequently full ASS scripts — no `-->` at all; that was the series "subtitle not available").
 4. Horizontal stretch previously showed video *behind* left/right black bars. FIXED in v0.9.
 5. Deep 4K = more RAM, zero buffer: default + README recommends.
 6. App cache was reaching 500+MB → v0.8 storage janitor wipes on app close (never during playback).
-7. **vidcore + vidfast resolve to the SAME CDN backend (`moon.goldenkite.top`)** — an auto-switch between them is a no-op network-wise. v0.10's switch is backend-aware.
+7. vidcore + vidfast share the `moon.goldenkite.top` backend for movies; **vidfast SERIES serve from `sun2.warmsquare.top`** (movies work there, series get born-dead 401 "expired" segment grants — the site's own player stalls too; app must rotate providers, not retry).
+8. **vidcore has NO stream server-side for many series** (final stream POST 404s — verified live with playwright).
+9. **Series subtitles on vidcore/vidfast**: `/wyzie?id={imdb}&season={s}&episode={e}` (live-verified; colon form is wrong). Listings contain DEAD tracks (404s) — fall through to the next track.
+10. **Mapple ids are TMDB-only** (`/watch/tv/{tmdbId}-{s}-{e}`); vidfast/vidcore series accept BOTH imdb and tmdb ids in `/tv/{id}/{s}/{e}` — app now uses TMDB for series when available.
 
-## v0.10.0 changes (this session — driven by the fresh log.txt)
+## v0.11.0 changes (this session — driven by log.txt + subtitlenotloadlog.txt + live probing + zip.zip saved pages)
+
+1. **Root cause of the vidcore↔vidfast infinite loop (log.txt, tt3952746 S3E11):**
+   - Episode had saved progress > 5 min ⇒ every 401 hit the `autoReResolved` "link expired → reconnect" path → full re-resolve from the TOP of providerOrder (Vidcore first) → vidcore no-stream → vidfast "verifies" (master OK) but 401s at playback (born-dead segment grants on sun2.warmsquare.top) → each successful resolve reset the one-shot flag → infinite loop. Mapple never reached (vidfast always returned a stream to the resolver).
+   - **Fixes in PlayerViewModel:** `routingOrder()` (series = saved order minus VIDCORE + VIDCORE last; movies = saved order); `readySinceLastResolve` window — playback errors before first READY count as provider rot in `playbackFailCounts` (2 ⇒ provider marked failed, autoSwitchProvider to next untried); `autoReconnects` capped at 3 (reset only on first READY / episode switch / Retry); `failedProviders` NO LONGER cleared on successful resolve (the loop's second hole) — now only "No video requests captured" hard-failures are added per resolve, cleared on retry()/switchEpisode.
+2. **Mapple full-source-scan + control (WebViewHarvester):**
+   - Mapple 13 sources from saved page: s25/mapple/s2/s28/s19/s16/s10 4K-capable first, then s27/s4/s12/s6/s7/s8; rotation engine: per-source timeouts (mapple 8s, s10 12s, s2 22s, s28 25s, s25 24s, others 5s), 2-source hedge race, worst-case ≈ 2 min.
+   - `harvest()` gains `deadPageBreakMs`/`manifestGraceMs`/`requirePlaying`; resolver passes mapple profile: series 150 s / movies 75 s timeout, 60 s dead-page break, exit only when the page's video is PLAYING (or manifest+25 s quiet).
+   - hook seeds `localStorage["mapple_source_orderv3"]` = 4K-first JSON array + removes `mapple_retry_count` (≥2 makes the page skip its first source). Nudges extended (90× for mapple).
+   - StreamVerifier.pickBest now prefers the NEWEST capture within a rank (mapple rotation: last manifest = the working source; vidfast: freshest token).
+3. **Series quality hunt (mapple probe):** after probeLadder, if series ladder top is 1..1999 (below 4K) and provider ≠ Mapple and not probed this episode → dedicated `resolver.resolve([MAPPLE])` with the long wait; if mapple's ladderTop is strictly higher, the stream (with its subs/siteSubs) REPLACES the current one before the player is built. Status shown in the loader. probeLadder now records `_ladderTop` (StateFlow) — UI reads it.
+4. **Honest quality labels (PlayerScreen):** qualityShort shows "Max 720p" when the known ladder top < 2000; qualityMenuLabel annotates every entry with the real ceiling ("this source tops at 720p"). DetailsScreen auto-source label is type-aware ("Auto (Vidfast first)" for series).
+5. **ASS/SSA subtitle support:** `Subtitles.parse` detects `[Script Info]`/`Dialogue:` and parses ASS events (H:MM:SS.cc centisecond timestamps, split(",", limit=10) — text field may contain commas, `\N`→newline, `{…}` stripped); `Wyzie.looksLikeSubtitle` + `looksLikeAss` accept ASS; mime `application/x-ssa` / `.ass` ext; harvester `onSiteSubtitle` + fetch-sniffer accept ASS bodies; full URLs in download-failure logs (the old `take(80)` looked like a "-e0" suffix); `preAttachSubtitle` tries up to 3 candidate tracks of the preferred language in order (dead-track fallback).
+6. **Providers.embedUrl:** series use `req.tmdbId` when available for vidfast/vidcore (imdb fallback; movies unchanged).
+
+## Known-open / next-prompt ideas
+
+- Website-vs-desktop-app feasibility question answered in README (app is the right home for locked 4K; a browser page can't buy RAM/pin renditions).
+- If vidfast series still 401s on a title where its site also stalls, that CDN genuinely has dead grants — the app now rotates to Mapple instead of looping; nothing more to fix app-side.
+- Possible future: expose mapple's per-source quality metadata (s25/s2/s28 etc. carry `maxResolutionHint`) to the Source menu UI.
+- Watch the new log lines when testing series: `[MappleQuality]`, `[Recovery] "…stream rejected by the player before playback"`, `=== Mapple: …` with long waits between resolver lines (that's the rotation running).
+
+## v0.10.0 changes (previous session)
 
 1. **First-open-after-reinstall "never loads" — full root-cause chain:**
    - Fresh install ⇒ DataStore empty ⇒ quality AUTO ⇒ ladder top (1504p @16.2 Mbps) on a cold line, no bandwidth estimate, empty cache ⇒ initial buffering > 20 s.

@@ -149,6 +149,7 @@ fun PlayerScreen(
     val durationMs by vm.durationMs.collectAsState()
     val videoSize by vm.videoSize.collectAsState()
     val qualityMode by vm.qualityMode.collectAsState()
+    val ladderTop by vm.ladderTop.collectAsState()
     val aspectMode by vm.aspectMode.collectAsState()
     val stretchYPct by vm.stretchYPct.collectAsState()
     val stretchXPct by vm.stretchXPct.collectAsState()
@@ -1184,14 +1185,14 @@ fun PlayerScreen(
                     Box {
                         MenuButton(
                             icon = { Icon(Icons.Filled.Bolt, null, tint = Color.White) },
-                            label = qualityShort(qualityMode),
+                            label = qualityShort(qualityMode, ladderTop),
                             open = openMenu == "quality",
                             onClick = { openMenu = if (openMenu == "quality") null else "quality" },
                         )
                         DropdownMenu(expanded = openMenu == "quality", onDismissRequest = { openMenu = null }) {
                             QualityMode.entries.forEach { m ->
                                 DropdownMenuItem(
-                                    text = { Text(m.label) },
+                                    text = { Text(qualityMenuLabel(m, ladderTop)) },
                                     onClick = { vm.setQuality(m); openMenu = null },
                                 )
                             }
@@ -1313,11 +1314,29 @@ private fun SubtitleOverlay(
     }
 }
 
-private fun qualityShort(m: QualityMode): String = when (m) {
+private fun qualityShort(m: QualityMode, ladderTop: Int?): String = when (m) {
     QualityMode.AUTO -> "Auto"
-    QualityMode.MAX -> "4K"
+    // honest button label: a 720p-only series is NOT "4K" — the lock still
+    // pins the top rendition (the best this source actually serves)
+    QualityMode.MAX ->
+        if (ladderTop != null && ladderTop < 2000) "Max ${ladderTop}p" else "4K"
     QualityMode.CAP_1080 -> "1080p"
     QualityMode.CAP_720 -> "720p"
+}
+
+/** Menu label with the REAL ceiling of the current source — the quality menu
+ *  used to offer "4K lock" on series whose ladder tops at 720p. */
+private fun qualityMenuLabel(m: QualityMode, ladderTop: Int?): String = when {
+    m == QualityMode.MAX && ladderTop != null && ladderTop < 2000 ->
+        "4K lock — top rendition (this source tops at ${ladderTop}p)"
+    m == QualityMode.MAX -> m.label
+    m == QualityMode.AUTO && ladderTop != null && ladderTop < 2000 ->
+        "Auto — adaptive (up to ${ladderTop}p on this source)"
+    m == QualityMode.CAP_1080 && ladderTop != null && ladderTop < 1080 ->
+        "Cap at 1080p (source tops at ${ladderTop}p anyway)"
+    m == QualityMode.CAP_720 && ladderTop != null && ladderTop < 720 ->
+        "Cap at 720p (source tops at ${ladderTop}p anyway)"
+    else -> m.label
 }
 
 private fun fallbackEmbed(request: PlaybackRequest): String? =

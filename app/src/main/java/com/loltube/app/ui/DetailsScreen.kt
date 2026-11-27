@@ -470,14 +470,21 @@ private fun PlaySection(
                     Icon(Icons.Filled.ArrowDropDown, contentDescription = null)
                     Spacer(Modifier.width(4.dp))
                     Text(
-                        state.provider?.label ?: "Auto (Vidcore first)",
+                        state.provider?.label
+                            ?: if (details.type == "series") "Auto (Vidfast first)"
+                            else "Auto (Vidcore first)",
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                     )
                 }
                 DropdownMenu(expanded = providerMenu, onDismissRequest = { providerMenu = false }) {
                     DropdownMenuItem(
-                        text = { Text("Auto (Vidcore first)") },
+                        text = {
+                            Text(
+                                if (details.type == "series") "Auto (Vidfast first)"
+                                else "Auto (Vidcore first)",
+                            )
+                        },
                         onClick = { onProvider(null); providerMenu = false },
                     )
                     ProviderId.entries.forEach { p ->
@@ -506,7 +513,13 @@ private fun PlaySection(
         }
 
         Text(
-            "Vidcore-first auto source, up to 4K adaptive. Aspect, quality, subtitles switchable during playback.",
+            // Series auto routing is vidfast-first with a dedicated Mapple
+            // quality check (its 13-source rotation often carries the 1080p
+            // copy of a 720p-only series); movies keep the vidcore-first order.
+            if (details.type == "series")
+                "Vidfast-first auto source for series; Mapple is checked for a better copy when this one tops below 4K. Aspect, quality, subtitles switchable during playback."
+            else
+                "Vidcore-first auto source, up to 4K adaptive. Aspect, quality, subtitles switchable during playback.",
             style = MaterialTheme.typography.labelSmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             modifier = Modifier.padding(top = 10.dp),
