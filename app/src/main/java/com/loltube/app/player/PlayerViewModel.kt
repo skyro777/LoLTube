@@ -201,6 +201,51 @@ class PlayerViewModel(
     /** Providers that hard-failed during THIS playback session. */
     private val failedProviders = mutableSetOf<ProviderId>()
 
+    /** Playback-level failure counts per provider — a stream that VERIFIED
+     *  but the player itself rejects it before any successful playback (401
+     *  "expired" grants, born-dead segments, 404s). Vidfast's warmsquare
+     *  series CDN is exactly this class: the manifest verifies, then every
+     *  child request 401s — the site's own player stalls on those grants
+     *  too. Two such failures mark the provider failed for this episode and
+     *  hand the title to the next source (this is what stops the old
+     *  vidcore↔vidfast infinite loop: the provider list had no memory of
+     *  who already failed). */
+    private val playbackFailCounts = mutableMapOf<ProviderId, Int>()
+
+    /** True from the moment a stream is armed until its first READY — the
+     *  window in which a playback error means "this provider's stream is
+     *  rotten", not "mid-session token expiry". */
+    @Volatile private var readySinceLastResolve = false
+
+    /** Total automatic "link expired" reconnects. CAPPED: a successful resolve
+     *  used to reset the one-shot flag, so a born-dead stream could re-resolve
+     *  forever. Reset to 0 only by real playback (first READY), an episode
+     *  switch, or the user's Retry. */
+    @Volatile private var autoReconnects = 0
+
+    /** One mapple quality-probe per episode (the "series tops at 720p here —
+     *  does mapple have a better copy?" hunt). */
+    @Volatile private var mappleQualityProbed = false
+
+    /** Honest ladder top of the CURRENT stream (null = unknown). The quality
+     *  menu shows real ceilings — "4K" stops appearing on 720p-only series. */
+    private val _ladderTop = MutableStateFlow<Int?>(null)
+    val ladderTop: StateFlow<Int?> = _ladderTop.asStateFlow()
+
+    /**
+     * Routing order for THIS content type. SERIES: the saved order with Vidcore
+     * demoted LAST — vidcore hard-404s a large share of series server-side
+     * (its final stream POST 404s; nothing the app can do), so it must not be
+     * the series default; vidfast leads, mapple (13-source rotation) second.
+     * Movies keep the saved order as-is (vidcore-first works there).
+     */
+    private fun routingOrder(): List<ProviderId> =
+        if (currentRequest.type == Catalog.SERIES) {
+            (settings.providerOrder.filter { it != ProviderId.VIDCORE }) + ProviderId.VIDCORE
+        } else {
+            settings.providerOrder
+        }
+
     /**
      * Codec-class error detection: RUNTIME_CHECK (1004 — raw
      * IllegalStateException/IllegalArgumentException on the playback thread) is
@@ -267,6 +312,8 @@ class PlayerViewModel(
                     val p = player.value ?: return
                     if (p.duration > 0) _durationMs.value = p.duration
                     hadFirstReady = true
+                    readySinceLastResolve = true
+                    autoReconnects = 0
                     bufferingSinceMs = 0
                     stallStage = 0
                     idleSinceMs = 0
@@ -326,6 +373,37 @@ class PlayerViewModel(
             val stream = currentStream
             val codecClass = isCodecClassError(error)
 
+            // PROVIDER-ROT DETECTION — runs BEFORE the recovery ladder: a
+            // stream that verified but is rejected by the player before ANY
+            // successful playback is a rotten grant, and re-preparing the SAME
+            // URL (ladder stage 1) or re-resolving the SAME provider is
+            // guaranteed to fail again. One fresh harvest is allowed (tokens do
+            // expire legitimately); two pre-playback rejections mark the
+            // provider failed for this episode and move to the next source.
+            val rottenStream = error.errorCode == PlaybackException.ERROR_CODE_IO_BAD_HTTP_STATUS ||
+                error.errorCode == PlaybackException.ERROR_CODE_IO_FILE_NOT_FOUND ||
+                error.errorCode == PlaybackException.ERROR_CODE_PARSING_MANIFEST_MALFORMED
+            if (rottenStream && !readySinceLastResolve && stream != null && !switchingSource) {
+                val count = (playbackFailCounts[stream.provider] ?: 0) + 1
+                playbackFailCounts[stream.provider] = count
+                AppLog.d(
+                    "Recovery",
+                    "${stream.provider.label} stream rejected by the player before playback " +
+                        "(attempt $count for this episode)",
+                )
+                if (count >= 2) {
+                    failedProviders.add(stream.provider)
+                    val remaining = routingOrder().filter { it !in failedProviders }
+                    if (remaining.isNotEmpty()) {
+                        _message.value =
+                            "${stream.provider.label} keeps serving dead links — trying ${remaining.first().label}…"
+                        autoSwitchProvider(remaining.first())
+                        return
+                    }
+                    // every provider failed — fall through to the ladder's terminal message
+                }
+            }
+
             // URL/sideload-class failures are provider-INDEPENDENT (the same
             // sidecars and the same URL pipeline follow us to every source) —
             // switching providers can never fix them. The classic case was the
@@ -350,11 +428,18 @@ class PlayerViewModel(
 
             // Long sessions: the CDN token (the ?s=... in the m3u8 URL) expires
             // after ~1h — re-resolve the stream at the current position.
-            if (!autoReResolved && stream != null && played > 5 * 60_000) {
+            // CAPPED and failed-provider-aware: the old one-shot flag reset on
+            // every successful resolve, so a born-dead stream re-resolved the
+            // same provider list forever (the exact vidcore→vidfast loop).
+            if (!autoReResolved && autoReconnects < 3 && stream != null && played > 5 * 60_000) {
                 autoReResolved = true
+                autoReconnects++
                 _message.value = "Stream link expired — reconnecting…"
                 val pos = _positionMs.value
-                startResolve(currentRequest.copy(startAtMs = pos), reusePlayer = true)
+                val order = routingOrder()
+                    .filter { it !in failedProviders }
+                    .ifEmpty { listOf(stream.provider) }
+                startResolve(currentRequest.copy(startAtMs = pos), reusePlayer = true, forceOrder = order)
                 return
             }
 
@@ -401,7 +486,7 @@ class PlayerViewModel(
                 else -> {
                     recoveryStage = 5
                     stream?.let { failedProviders.add(it.provider) }
-                    val remaining = settings.providerOrder.filter { it !in failedProviders }
+                    val remaining = routingOrder().filter { it !in failedProviders }
                     if (remaining.isNotEmpty() && !switchingSource) {
                         _message.value = "This source keeps failing — trying ${remaining.first().label}…"
                         autoSwitchProvider(remaining.first())
@@ -627,14 +712,24 @@ class PlayerViewModel(
                 { it.isHearingImpaired == true }, // non-HI first
             )
         )
-        val pick = sorted.firstOrNull { s -> s.language?.lowercase() == pref }
-            ?: sorted.firstOrNull { s -> s.language?.lowercase()?.startsWith(pref) == true }
-            ?: sorted.firstOrNull { s -> s.display.lowercase().startsWith(pref) }
-            ?: sorted.firstOrNull { s ->
-                s.language?.lowercase() == "en" || s.display.contains("english", true)
-            }
-            ?: return
-        attachSubtitleCues(pick, siteNative = siteNative)
+        // Preference-ordered candidates (preferred language first, then the
+        // English fallback), each tried in turn: listings contain DEAD tracks
+        // (404/500 on individual files — verified live), so one unavailable
+        // track must fall through to the next instead of reporting
+        // "subtitle not available" while the language clearly exists.
+        val langMatches = sorted.filter { s ->
+            s.language?.lowercase() == pref || s.language?.lowercase()?.startsWith(pref) == true ||
+                s.display.lowercase().startsWith(pref)
+        }
+        val englishFallback = sorted.filter { s ->
+            s.language?.lowercase() == "en" || s.display.contains("english", true)
+        }
+        val ordered = (langMatches + englishFallback).distinctBy { it.url }
+        if (ordered.isEmpty()) return
+        for (pick in ordered.take(3)) {
+            if (attachSubtitleCues(pick, siteNative = siteNative)) return
+            AppLog.d("Subs", "track \"${pick.display}\" unavailable — trying the next one")
+        }
     }
 
     /**
@@ -755,6 +850,7 @@ class PlayerViewModel(
         val ladder = PlayerEngine.parseLadder(text)
         if (ladder.isEmpty()) return
         val top = ladder.first()
+        _ladderTop.value = top.height // honest ceiling for the quality menu
         AppLog.d(
             "Ladder",
             "site ladder: " + ladder.take(6).joinToString { PlayerEngine.describeVariant(it) },
@@ -775,6 +871,19 @@ class PlayerViewModel(
         }
     }
 
+    /** Top variant height of a stream's own master playlist (0 if unknown) —
+     *  used by the series quality-hunt to compare mapple's copy with the
+     *  current provider's. */
+    private suspend fun ladderTopOf(stream: ResolvedStream): Int {
+        if (stream.kind != "m3u8-master" && stream.kind != "m3u8") return 0
+        val text = kotlinx.coroutines.withTimeoutOrNull(6_000) {
+            kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                runCatching { Net.get(stream.url, headers = stream.headers) }.getOrNull()
+            }
+        } ?: return 0
+        return PlayerEngine.parseLadder(text).firstOrNull()?.height ?: 0
+    }
+
     private fun startResolve(
         req: PlaybackRequest,
         reusePlayer: Boolean,
@@ -783,9 +892,12 @@ class PlayerViewModel(
     ) {
         viewModelScope.launch {
             _phase.value = Phase.Resolving((forceOrder?.first() ?: providerChoice)?.label ?: "Auto", "Starting…")
-            val order = forceOrder ?: providerChoice?.let { listOf(it) } ?: settings.providerOrder
+            // SERIES routing: vidfast first, mapple second, vidcore last (its
+            // series 404 class) — routingOrder() demotes vidcore for series.
+            val order = forceOrder ?: providerChoice?.let { listOf(it) } ?: routingOrder()
+            _ladderTop.value = null
 
-            val (stream, attempts) = resolver.resolve(req, order, settings.preferredSubtitleLang, excludeHost) { id, status ->
+            var (stream, attempts) = resolver.resolve(req, order, settings.preferredSubtitleLang, excludeHost) { id, status ->
                 _phase.value = Phase.Resolving(id.label, status)
             }
 
@@ -811,6 +923,17 @@ class PlayerViewModel(
 
             currentStream = stream
             currentRequest = req
+
+            // Hard resolve-failures (no stream captured at all — vidcore's
+            // series-404 class) stay marked for the whole EPISODE so the router
+            // never loops back to a provider that provably has no stream for
+            // this title. (failedProviders deliberately survives later
+            // successful resolves now — clearing it after each resolve is
+            // exactly what let the old router forget who already failed and
+            // loop vidcore→vidfast→vidcore forever.)
+            attempts.filter { a -> a.error != null && a.error!!.contains("No video requests") }
+                .forEach { a -> failedProviders.add(a.provider) }
+
             providerSubs = stream.subs
             _siteSubs.value = stream.siteSubs
             if (providerSubs.isNotEmpty()) mergeSubs(emptyList())
@@ -834,8 +957,8 @@ class PlayerViewModel(
             }
 
             // fresh stream re-arms the recovery ladder (but NOT the session
-            // decoder cap — a box that crashed at 4K must not crash again)
-            failedProviders.clear()
+            // decoder cap — a box that crashed at 4K must not crash again,
+            // and NOT the failed-provider memory — see above)
             recoveryStage = 0
 
             // One quick look at the site's own ladder before building the
@@ -843,6 +966,47 @@ class PlayerViewModel(
             // honestly support it. Prevents the guaranteed 4K crash on boxes
             // whose codec list itself already says no.
             probeLadder(stream)
+
+            // SERIES QUALITY HUNT: the chosen source's ladder tops BELOW 4K
+            // (e.g. a 720p-only series) — give Mapple one dedicated probe and
+            // switch if its copy is genuinely better. Mapple's 13-source
+            // rotation (with the app's 4K-first source order seeded into the
+            // page) is exactly where the 1080p copy of a 720p series hides.
+            // Only on the initial resolve — never mid-playback.
+            if (req.type == Catalog.SERIES && !reusePlayer && !mappleQualityProbed &&
+                stream.provider != ProviderId.MAPPLE && ProviderId.MAPPLE !in failedProviders
+            ) {
+                val currentTop = _ladderTop.value ?: 0
+                if (currentTop in 1 until 2000) {
+                    mappleQualityProbed = true
+                    _phase.value = Phase.Resolving(
+                        stream.provider.label,
+                        "Tops at ${currentTop}p here — checking Mapple for a better copy…",
+                    )
+                    AppLog.d("MappleQuality", "series tops at ${currentTop}p on ${stream.provider.label} — probing mapple for a better copy")
+                    val (mappleStream, mappleAttempts) = resolver.resolve(
+                        req, listOf(ProviderId.MAPPLE), settings.preferredSubtitleLang, null,
+                    ) { id, status -> _phase.value = Phase.Resolving(id.label, status) }
+                    mappleAttempts.filter { a -> a.error != null }
+                        .forEach { a -> failedProviders.add(a.provider) }
+                    if (mappleStream != null) {
+                        val mappleTop = ladderTopOf(mappleStream)
+                        AppLog.d("MappleQuality", "mapple ladder top: ${if (mappleTop > 0) "${mappleTop}p" else "unknown"}")
+                        if (mappleTop > currentTop) {
+                            AppLog.d("MappleQuality", "mapple ${mappleTop}p beats ${currentTop}p — switching to Mapple")
+                            _message.value = "Found a ${mappleTop}p copy on Mapple — switching…"
+                            stream = mappleStream
+                            currentStream = stream
+                            providerSubs = stream.subs
+                            _siteSubs.value = stream.siteSubs
+                            if (providerSubs.isNotEmpty()) mergeSubs(emptyList())
+                            _ladderTop.value = mappleTop
+                        } else {
+                            AppLog.d("MappleQuality", "staying on ${stream.provider.label} (${currentTop}p — mapple not better)")
+                        }
+                    }
+                }
+            }
 
             // Re-arm the subtitle auto-attach for the NEW stream: the sticky
             // language (or the previously parsed sidecar of the same title)
@@ -875,6 +1039,7 @@ class PlayerViewModel(
 
             PlayerEngine.applyQualityMode(p, _qualityMode.value, sessionDecoderCap)
             autoReResolved = false
+            readySinceLastResolve = false
             bufferingSinceMs = 0
             stallStage = 0
             switchingSource = false
@@ -1039,7 +1204,7 @@ class PlayerViewModel(
     private fun autoSwitchProvider(next: ProviderId? = null) {
         if (switchingSource) return
         val stream = currentStream ?: return
-        val order = settings.providerOrder.filter { it !in failedProviders }
+        val order = routingOrder().filter { it !in failedProviders }
         if (order.size < 2) {
             AppLog.d("Watchdog", "no other provider left to try (${failedProviders.size} failed) — holding")
             return
@@ -1350,6 +1515,11 @@ class PlayerViewModel(
         recoveryStage = 0
         cleanSinceMs = 0
         failedProviders.clear()
+        playbackFailCounts.clear()
+        autoReconnects = 0
+        mappleQualityProbed = false
+        readySinceLastResolve = false
+        _ladderTop.value = null
         viewModelScope.launch {
             settings = SettingsStore.read(context)
             // keep the watched position when switching sources manually
@@ -1377,6 +1547,15 @@ class PlayerViewModel(
         _subs.value = emptyList()
         providerSubs = emptyList()
         _activeSubLabel.value = null
+        // new episode = fresh routing state: failure memories, playback counts,
+        // the mapple quality-probe and the reconnect budget all reset (the
+        // previous episode's failures say nothing about this one).
+        failedProviders.clear()
+        playbackFailCounts.clear()
+        autoReconnects = 0
+        mappleQualityProbed = false
+        readySinceLastResolve = false
+        _ladderTop.value = null
         // new episode = fresh subtitle file (its timing is episode-specific);
         // the sticky LANGUAGE stays so the same language auto-attaches.
         sidecarSub = null
