@@ -78,16 +78,29 @@ object Wyzie {
                 })
             }.getOrNull() ?: continue
             if (!looksLikeSubtitle(body)) continue
-            val mime = if (body.trimStart().startsWith("WEBVTT", ignoreCase = true)) "text/vtt"
-            else "application/x-subrip"
-            val ext = if (mime == "text/vtt") "vtt" else "srt"
+            // ASS scripts are common for series (a full SubStation Alpha file,
+            // no `-->` timeline) — they need their own mime so a sideloaded
+            // MediaItem is parsed by the right text decoder.
+            val isAss = looksLikeAss(body)
+            val mime = when {
+                isAss -> "application/x-ssa"
+                body.trimStart().startsWith("WEBVTT", ignoreCase = true) -> "text/vtt"
+                else -> "application/x-subrip"
+            }
+            val ext = when (mime) {
+                "text/vtt" -> "vtt"
+                "application/x-ssa" -> "ass"
+                else -> "srt"
+            }
             val safe = (sub.language ?: "sub").replace(Regex("[^a-zA-Z0-9]"), "")
             val f = java.io.File(LoLTubeDir.subsDir(), "${System.currentTimeMillis()}_$safe.$ext")
             if (!runCatching { f.writeText(body) }.isSuccess) continue
             AppLog.d("Wyzie", "subtitle ${sub.display} downloaded (${body.length} chars, $mime, referer=${referer.ifEmpty { "none" }})")
             return@withContext f to mime
         }
-        AppLog.e("Wyzie", "subtitle download failed: ${sub.url.take(80)}")
+        // full URL on purpose: the old truncated take(80) log once masqueraded
+        // as a "-e0" suffix and sent the fix hunting in the wrong direction
+        AppLog.e("Wyzie", "subtitle download failed: ${sub.url}")
         null
     }
 
@@ -96,8 +109,16 @@ object Wyzie {
         val t = body.trimStart('﻿', '\uFEFF', ' ')
         return t.startsWith("WEBVTT", true) ||
             t.contains("-->") ||
-            Regex("""^\s*\d+\s*$""", RegexOption.MULTILINE).containsMatchIn(t)
+            Regex("""^\s*\d+\s*$""", RegexOption.MULTILINE).containsMatchIn(t) ||
+            // SubStation Alpha — series tracks are frequently full ASS
+            // scripts (header + Dialogue: events, zero `-->` lines)
+            looksLikeAss(t)
     }
+
+    /** SubStation Alpha detection (ASS/SSA). */
+    private fun looksLikeAss(body: String): Boolean =
+        body.startsWith("[Script Info]", ignoreCase = true) ||
+            Regex("^Dialogue:", RegexOption.IGNORE_CASE).containsMatchIn(body)
 }
 
 /** Cache dir helpers. */
