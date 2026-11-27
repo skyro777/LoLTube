@@ -1,6 +1,7 @@
 package com.loltube.app.providers
 
 import android.content.Context
+import com.loltube.app.data.Catalog
 import com.loltube.app.player.ManifestCapInterceptor
 import com.loltube.app.util.AppLog
 import kotlinx.serialization.Serializable
@@ -49,8 +50,24 @@ class StreamResolver(private val context: Context) {
             AppLog.d("Resolver", "=== ${id.label}: $embed")
 
             val harvester = WebViewHarvester(context)
+            // Mapple runs a 13-source rotation inside its page — series worst
+            // case is ~2 minutes — so its harvest window is much wider than
+            // vidfast/vidcore's (this is the "wait for mapple to check all of
+            // its sources" fix; the old 45 s gave up mid-rotation).
+            val isMapple = id == ProviderId.MAPPLE
+            val isSeries = request.type != Catalog.MOVIE
             val harvest = try {
-                harvester.harvest(embed, prefSubLang)
+                harvester.harvest(
+                    embed, prefSubLang,
+                    timeoutMs = when {
+                        isMapple && isSeries -> 150_000L
+                        isMapple -> 75_000L
+                        else -> 45_000L
+                    },
+                    deadPageBreakMs = if (isMapple) 60_000L else 20_000L,
+                    manifestGraceMs = if (isMapple) 25_000L else 12_000L,
+                    requirePlaying = isMapple,
+                )
             } catch (t: Throwable) {
                 AppLog.e("Resolver", "${id.label} harvest crashed: ${t.message}")
                 attempts.add(Attempt(id, "Harvester error: ${t.message}"))

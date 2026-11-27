@@ -151,12 +151,18 @@ class WebViewHarvester(private val context: Context) {
 
         /** The page downloaded something that parses as a subtitle file. This is
          *  the SITE-SYNCED subtitle (matched to the exact stream copy) — the
-         *  body is kept verbatim so playback never has to re-download it. */
+         *  body is kept verbatim so playback never has to re-download it.
+         *  ASS/SSA scripts count too: series subtitle tracks are frequently
+         *  full SubStation Alpha files (no `-->` timeline at all) — rejecting
+         *  those is how "subtitle not available" appeared on titles whose
+         *  English track only exists as ASS. */
         @JavascriptInterface
         fun onSiteSubtitle(url: String, body: String) {
             if (body.length < 150 || body.length > 1_500_000) return
-            if (!body.contains("-->")) return
-            if (body.split("-->").size < 3) return // one stray arrow is not a subtitle
+            val isTimeline = body.split("-->").size >= 3 // one stray arrow is not a subtitle
+            val isAss = body.contains("[Script Info]", ignoreCase = true) ||
+                Regex("^Dialogue:", RegexOption.IGNORE_CASE).containsMatchIn(body)
+            if (!isTimeline && !isAss) return
             if (siteSubs.any { it.url == url }) return
             val coupled = !url.contains("/wyzie")
             siteSubs.add(SiteSubtitle(url, body, coupled))
@@ -192,8 +198,23 @@ class WebViewHarvester(private val context: Context) {
      * FILE the page actually downloaded for its auto-selected language track.
      * [prefSubLang] seeds the page's stored language so the site auto-selects
      * (and downloads) the track it would pair with THIS stream copy.
+     *
+     * Mapple wait profile: mapple embeds run a client-side source ROTATION
+     * engine (13 sources; per-source timeouts 5–25 s; worst-case exhaustion
+     * ≈ 2 minutes) and the only trustworthy "a source works" signal is the
+     * page's video actually PLAYING — a captured manifest alone can be a
+     * dead source the page has already rotated away from. So for mapple the
+     * harvest [requirePlaying] and waits far longer (up to 150 s for series)
+     * instead of the 45 s that used to give up mid-rotation.
      */
-    suspend fun harvest(url: String, prefSubLang: String = "en", timeoutMs: Long = 45_000): HarvestResult {
+    suspend fun harvest(
+        url: String,
+        prefSubLang: String = "en",
+        timeoutMs: Long = 45_000,
+        deadPageBreakMs: Long = 20_000,
+        manifestGraceMs: Long = 12_000,
+        requirePlaying: Boolean = false,
+    ): HarvestResult {
         candidates.clear()
         siteSubs.clear()
         sawFragment = false
@@ -205,7 +226,7 @@ class WebViewHarvester(private val context: Context) {
         return withContext(Dispatchers.Main) {
             var wv: WebView? = null
             try {
-                wv = createWebView(url, prefSubLang)
+                wv = createWebView(url, prefSubLang, requirePlaying)
                 webViewRef = wv
                 val start = now()
                 var lastCandidateCount = 0
@@ -215,12 +236,19 @@ class WebViewHarvester(private val context: Context) {
                         ensureActive()
                         delay(250)
                         val t = now()
-                        if (lastActivityMs == 0L && t - start > 20_000) break // page appears dead
+                        if (lastActivityMs == 0L && t - start > deadPageBreakMs) break // page appears dead
                         val hasManifest = candidates.any { it.kind == "m3u8" || it.kind == "mpd" }
                         val quietMs = if (lastActivityMs == 0L) 0 else t - lastActivityMs
                         val grew = candidates.size > lastCandidateCount
                         if (grew) lastCandidateCount = candidates.size
-                        val earlyExit = hasManifest && (sawFragment || sawPlaying || quietMs > 12_000)
+                        // mapple: only PLAYING proves a live source (the rotation
+                        // engine keeps trying otherwise); vidfast/vidcore: any
+                        // manifest + traffic is decisive.
+                        val earlyExit = if (requirePlaying) {
+                            sawPlaying || (hasManifest && quietMs > manifestGraceMs)
+                        } else {
+                            hasManifest && (sawFragment || sawPlaying || quietMs > manifestGraceMs)
+                        }
                         if (earlyExit) break
                     }
                 }
@@ -251,7 +279,7 @@ class WebViewHarvester(private val context: Context) {
     }
 
     @SuppressLint("SetJavaScriptEnabled")
-    private fun createWebView(url: String, prefSubLang: String): WebView = WebView(context).apply {
+    private fun createWebView(url: String, prefSubLang: String, requirePlaying: Boolean): WebView = WebView(context).apply {
         settings.apply {
             javaScriptEnabled = true
             domStorageEnabled = true
@@ -360,13 +388,13 @@ class WebViewHarvester(private val context: Context) {
         // document-start hook injection (best effort)
         try {
             if (WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)) {
-                WebViewCompat.addDocumentStartJavaScript(this, hookJs(prefSubLang), setOf("*"))
+                WebViewCompat.addDocumentStartJavaScript(this, hookJs(prefSubLang, requirePlaying), setOf("*"))
             }
         } catch (t: Throwable) {
             AppLog.d("Harvest", "document-start injection unavailable: ${t.message}")
         }
 
-        currentHookJs = hookJs(prefSubLang)
+        currentHookJs = hookJs(prefSubLang, requirePlaying)
         loadUrl(url)
     }
 
@@ -422,7 +450,7 @@ class WebViewHarvester(private val context: Context) {
          *  copy (vidfast/vidcore read localStorage "language" for auto-select).
          *  Also sniffs subtitle LISTING responses (mapple's server action) so
          *  every provider's own track menu can be replayed app-side. */
-        private fun hookJs(prefLang: String): String = """
+        private fun hookJs(prefLang: String, longNudges: Boolean = false): String = """
             (function(){
               // seed the site's stored language on EVERY injection — the
               // document-start context can silently fail (storage not ready),
@@ -430,6 +458,23 @@ class WebViewHarvester(private val context: Context) {
               try {
                 if (window.localStorage) {
                   localStorage.setItem('language', '__LANG__');
+                }
+              } catch(e) {}
+              // MAPPLE ONLY — take control of its 13-source rotation: mapple
+              // persists the user's source drag-order in localStorage
+              // ("mapple_source_orderv3", a JSON array of source ids). Seeding
+              // it puts the 4K-confirmed sources first (s25, mapple, s2, s28,
+              // s19, s16, s10, then the rest), so its rotation engine tries
+              // the quality sources before the 720p ones. Also clears
+              // "mapple_retry_count" — the page skips its FIRST source when
+              // that counter is >= 2 (a stale retry count would silently
+              // demote whatever we put first).
+              try {
+                if (location.hostname.indexOf('mapple') >= 0 && window.localStorage) {
+                  localStorage.setItem('mapple_source_orderv3', JSON.stringify(
+                    ["s25","mapple","s2","s28","s19","s16","s10","s27","s4","s12","s6","s7","s8"]
+                  ));
+                  localStorage.removeItem('mapple_retry_count');
                 }
               } catch(e) {}
               if (window.__loltube_hooked) return;
@@ -455,6 +500,8 @@ class WebViewHarvester(private val context: Context) {
               // keep nudging the page's video to actually PLAY (muted): the
               // site downloads its auto-selected subtitle around playback —
               // that file is the stream-coupled subtitle we want to capture.
+              // Long mode (mapple): the source rotation needs minutes, so the
+              // nudge keeps pressing play the whole window.
               var nudges = 0;
               try {
                 var nudgeTimer = setInterval(function(){
@@ -463,7 +510,7 @@ class WebViewHarvester(private val context: Context) {
                       v.muted = true; v.volume = 0;
                       var p = v.play(); if (p && p.catch) p.catch(function(){});
                     });
-                    if (++nudges >= 25) clearInterval(nudgeTimer);
+                    if (++nudges >= __NUDGES__) clearInterval(nudgeTimer);
                   } catch(e) {}
                 }, 1500);
               } catch(e) {}
@@ -505,6 +552,12 @@ class WebViewHarvester(private val context: Context) {
                                   __loltube.onSiteSubtitle(u, t);
                                   return;
                                 }
+                                // ASS/SSA subtitle (series tracks are often
+                                // full SubStation Alpha scripts — no '-->')
+                                if (t.indexOf('[Script Info]') === 0 || /^Dialogue:/m.test(t)) {
+                                  __loltube.onSiteSubtitle(u, t);
+                                  return;
+                                }
                                 // subtitle LISTING (mapple's server action / any
                                 // track-array JSON) — the site's own menu
                                 if (t.indexOf('"url"') > 0 &&
@@ -541,6 +594,8 @@ class WebViewHarvester(private val context: Context) {
                 }, true);
               } catch(e){}
             })();
-        """.trimIndent().replace("__LANG__", prefLang.take(8).replace("'", ""))
+        """.trimIndent()
+            .replace("__LANG__", prefLang.take(8).replace("'", ""))
+            .replace("__NUDGES__", if (longNudges) "90" else "25")
     }
 }

@@ -27,6 +27,12 @@ object StreamVerifier {
     /**
      * Tries candidates (best-ranked first) until one responds with a real
      * media payload. Returns null if nothing works.
+     *
+     * Within the same rank the NEWEST capture is tried first: CDNs mint a new
+     * signed URL per fetch (the old token is stale the moment the page rotated
+     * sources), and mapple's source-rotation means the LAST captured manifest
+     * is the one from the source that actually works — the first one is often
+     * a dead source the page already rotated away from.
      */
     suspend fun pickBest(
         candidates: List<StreamCandidate>,
@@ -35,7 +41,7 @@ object StreamVerifier {
     ): Verified? = withContext(Dispatchers.IO) {
         val ordered = candidates
             .filter { it.kind == "m3u8" || it.kind == "mpd" || it.kind == "mp4" }
-            .sortedWith(compareBy({ rank(adjustedKind(it)) }, { it.capturedAtMs }))
+            .sortedWith(compareBy({ rank(adjustedKind(it)) }, { -it.capturedAtMs }))
 
         for (c in ordered) {
             ensureActive()

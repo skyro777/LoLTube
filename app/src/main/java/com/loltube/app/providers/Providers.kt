@@ -37,14 +37,23 @@ data class ResolvedStream(
 )
 
 object Providers {
+    /**
+     * Embed URLs. For SERIES, vidfast/vidcore accept both IMDb and TMDB ids,
+     * but the TMDB id routes to the episode's stream more reliably (verified
+     * live: both return the same player page; the user's testing showed the
+     * TMDB id resolves series vidcore's stream far more often) — so the TMDB
+     * id is used whenever Cinemeta provided one, IMDb as fallback. Movies keep
+     * the IMDb id (movies resolve fine on it everywhere). Mapple is TMDB-only
+     * by design of its embed API.
+     */
     fun embedUrl(id: ProviderId, req: PlaybackRequest): String? = when (id) {
         ProviderId.VIDFAST ->
             if (req.type == Catalog.MOVIE) "https://vidfast.vc/movie/${req.imdbId}"
-            else "https://vidfast.vc/tv/${req.imdbId}/${req.season ?: 1}/${req.episode ?: 1}"
+            else "https://vidfast.vc/tv/${seriesId(req)}/${req.season ?: 1}/${req.episode ?: 1}"
 
         ProviderId.VIDCORE ->
             if (req.type == Catalog.MOVIE) "https://vidcore.io/movie/${req.imdbId}"
-            else "https://vidcore.io/tv/${req.imdbId}/${req.season ?: 1}/${req.episode ?: 1}"
+            else "https://vidcore.io/tv/${seriesId(req)}/${req.season ?: 1}/${req.episode ?: 1}"
 
         ProviderId.MAPPLE -> {
             val tmdb = req.tmdbId ?: return null
@@ -52,6 +61,10 @@ object Providers {
             else "https://mapple.fun/watch/tv/$tmdb-${req.season ?: 1}-${req.episode ?: 1}?autoPlay=true"
         }
     }
+
+    /** TMDB id when we have one (series), IMDb otherwise. */
+    private fun seriesId(req: PlaybackRequest): String =
+        req.tmdbId?.toString() ?: req.imdbId
 
     fun origin(id: ProviderId): String = when (id) {
         ProviderId.VIDFAST -> "https://vidfast.vc"
