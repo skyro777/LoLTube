@@ -56,6 +56,65 @@ object Wyzie {
             emptyList()
         }
 
+    /** The SITES' OWN selection algorithm (verified from the vidfast/vidcore
+     *  bundles): sort the listing UTF-8-encoding-first, non-HI-before-HI, then
+     *  arm the FIRST track of the stored language, English as the fallback.
+     *  Shared by the harvest-time immediate download, the in-page pick and the
+     *  pre-attach path so every layer arms the exact track the site would. */
+    fun siteOrdered(pool: List<Sub>, prefLang: String): List<Sub> {
+        val pref = prefLang.lowercase()
+        val sorted = pool.sortedWith(
+            compareBy<Sub>(
+                { (it.encoding ?: "").uppercase() != "UTF-8" }, // UTF-8 first
+                { it.isHearingImpaired == true }, // non-HI first
+            )
+        )
+        val langMatches = sorted.filter { s ->
+            s.language?.lowercase() == pref || s.language?.lowercase()?.startsWith(pref) == true ||
+                s.display.lowercase().startsWith(pref)
+        }
+        val englishFallback = sorted.filter { s ->
+            s.language?.lowercase() == "en" || s.display.contains("english", true)
+        }
+        return (langMatches + englishFallback).distinctBy { it.url }
+    }
+
+    /** The first track the site's own player would arm for this language. */
+    fun pickSiteTrack(pool: List<Sub>, prefLang: String): Sub? =
+        siteOrdered(pool, prefLang).firstOrNull()
+
+    /**
+     * FRESH-LISTING subtitle: re-fetches the listing and immediately downloads
+     * the site's own pick. Why this exists (verified live): the /wyzie token
+     * URLs are short-lived and rotate server-side — the token captured during
+     * the harvest can be DEAD seconds later at attach time (the exact token
+     * from a user's failure log returned 404 on re-test while a FRESH
+     * listing's token for the same track returned 200). A fresh listing + an
+     * immediate download is always inside the validity window.
+     * Returns (sub, body, mime) or null.
+     */
+    suspend fun freshBestSub(
+        imdbId: String,
+        season: Int? = null,
+        episode: Int? = null,
+        prefLang: String = "en",
+    ): Triple<Sub, String, String>? = withContext(Dispatchers.IO) {
+        val listing = fetch(imdbId, season, episode)
+        if (listing.isEmpty()) return@withContext null
+        val pick = pickSiteTrack(listing, prefLang) ?: return@withContext null
+        val body = runCatching {
+            Net.get(pick.url, headers = mapOf("Accept" to "*/*"))
+        }.getOrNull() ?: return@withContext null
+        if (!looksLikeSubtitle(body)) return@withContext null
+        val mime = when {
+            looksLikeAss(body) -> "application/x-ssa"
+            body.trimStart().startsWith("WEBVTT", ignoreCase = true) -> "text/vtt"
+            else -> "application/x-subrip"
+        }
+        AppLog.d("Wyzie", "fresh-listing subtitle "${pick.display}" downloaded (${body.length} chars, $mime)")
+        Triple(pick, body, mime)
+    }
+
     /** Download a subtitle and persist to a cache file; returns (file, mime).
      *  Retries with several Referer strategies since the subtitle hosts' hot-link
      *  rules vary. Also validates the payload actually looks like a subtitle. */
@@ -70,13 +129,19 @@ object Wyzie {
             "", // no referer at all
         ).distinct()
 
+        var lastStatus = 0
         for (referer in referers) {
-            val body = runCatching {
+            val body = (try {
                 Net.get(sub.url, headers = buildMap {
                     put("Accept", "*/*")
                     if (referer.isNotEmpty()) put("Referer", referer)
                 })
-            }.getOrNull() ?: continue
+            } catch (e: Net.HttpException) {
+                lastStatus = e.code
+                null
+            } catch (e: Throwable) {
+                null
+            }) ?: continue
             if (!looksLikeSubtitle(body)) continue
             // ASS scripts are common for series (a full SubStation Alpha file,
             // no `-->` timeline) — they need their own mime so a sideloaded
@@ -98,9 +163,11 @@ object Wyzie {
             AppLog.d("Wyzie", "subtitle ${sub.display} downloaded (${body.length} chars, $mime, referer=${referer.ifEmpty { "none" }})")
             return@withContext f to mime
         }
-        // full URL on purpose: the old truncated take(80) log once masqueraded
-        // as a "-e0" suffix and sent the fix hunting in the wrong direction
-        AppLog.e("Wyzie", "subtitle download failed: ${sub.url}")
+        // full URL + the HTTP status on purpose: the old truncated take(80) log
+        // once masqueraded as a "-e0" suffix and sent the fix hunting in the
+        // wrong direction; the status tells the next session whether the token
+        // expired (404), Cloudflare challenged (403) or rate-limited (429)
+        AppLog.e("Wyzie", "subtitle download failed (HTTP $lastStatus): ${sub.url}")
         null
     }
 

@@ -34,6 +34,10 @@ data class ResolvedStream(
     /** Subtitle files the page actually DOWNLOADED for its auto-selected track —
      *  stream-coupled (the site pairs them with the exact copy it serves). */
     val siteSubs: List<SiteSubtitle> = emptyList(),
+    /** When resolved through Mapple's direct source probe: which of the 13
+     *  internal sources (s25/s2/…) this stream came from and its ladder top. */
+    val mappleSource: String? = null,
+    val mappleSourceHeight: Int = 0,
 )
 
 object Providers {

@@ -50,10 +50,11 @@ class StreamResolver(private val context: Context) {
             AppLog.d("Resolver", "=== ${id.label}: $embed")
 
             val harvester = WebViewHarvester(context)
-            // Mapple runs a 13-source rotation inside its page — series worst
-            // case is ~2 minutes — so its harvest window is much wider than
-            // vidfast/vidcore's (this is the "wait for mapple to check all of
-            // its sources" fix; the old 45 s gave up mid-rotation).
+            // Mapple: the DIRECT source probe (injected JS resolves every one
+            // of the 13 sources itself) usually finishes the harvest in
+            // 10–30 s; the wide window below stays as the fallback for the
+            // page's own rotation (13 sources, per-source timeouts 5–25 s,
+            // worst case ≈ 2 minutes) when the probe machinery doesn't fire.
             val isMapple = id == ProviderId.MAPPLE
             val isSeries = request.type != Catalog.MOVIE
             val harvest = try {
@@ -75,13 +76,66 @@ class StreamResolver(private val context: Context) {
             }
             val candidates = harvest.candidates
 
-            if (candidates.isEmpty()) {
+            if (candidates.isEmpty() && harvest.mappleSources.none { it.url.isNotBlank() }) {
                 attempts.add(Attempt(id, "No video requests captured (player blocked or slow)"))
                 continue
             }
 
-            onStatus(id, "Verifying ${candidates.size} stream candidate(s)…")
             val headers = Providers.playbackHeaders(id)
+
+            // ===== DIRECT SOURCE CONTROL (mapple) =====
+            // The injected probe resolved every one of mapple's 13 sources
+            // (encrypted URL per source -> stream_url -> master playlist ->
+            // RESOLUTION ladder). Verify the BEST ones natively and play the
+            // winner — instead of whatever mapple's "first online wins"
+            // rotation landed on. The page's own captures stay as fallback.
+            if (id == ProviderId.MAPPLE && harvest.mappleSources.isNotEmpty()) {
+                val live = harvest.mappleSources.filter { it.url.isNotBlank() }
+                val ordered = live.sortedWith(
+                    compareByDescending<MappleSourceProbe> { if (it.height >= 2000) 1 else 0 }
+                        .thenByDescending { it.height },
+                )
+                if (ordered.isNotEmpty()) {
+                    val best = ordered.first()
+                    onStatus(id, "Source ${best.source} looks best (${if (best.height > 0) "${best.height}p" else "mp4"}) — verifying…")
+                    AppLog.d(
+                        "MappleProbe",
+                        "probe table: " + ordered.joinToString { "${it.source}=${if (it.height > 0) "${it.height}p" else if (it.url.isNotBlank()) "mp4" else "offline"}" },
+                    )
+                    for (p in ordered) {
+                        val verified = StreamVerifier.pickBest(
+                            listOf(StreamCandidate(p.url, "m3u8", System.currentTimeMillis())),
+                            headers, "${id.label}/${p.source}",
+                        )
+                        if (verified != null) {
+                            AppLog.d("MappleProbe", "DIRECT source control: ${p.source} (${if (p.height > 0) "${p.height}p" else "mp4"}) verified — using it")
+                            val probeStream = ResolvedStream(
+                                url = verified.url,
+                                kind = verified.kind,
+                                provider = id,
+                                headers = headers,
+                                allCandidates = candidates,
+                                subs = harvest.subs,
+                                siteSubs = harvest.siteSubs,
+                                mappleSource = p.source,
+                                mappleSourceHeight = p.height,
+                            )
+                            val host = try { android.net.Uri.parse(verified.url).host } catch (t: Throwable) { null }
+                            if (excludeHost == null || host != excludeHost) return probeStream to attempts
+                            if (fallback == null) fallback = probeStream
+                            break // same-backend: stop, fall through to the page captures
+                        }
+                    }
+                    if (candidates.isEmpty()) {
+                        AppLog.d("MappleProbe", "no probe source verified natively — reporting it")
+                        attempts.add(Attempt(id, "Probe found sources but none verified (expired/blocked)"))
+                        continue
+                    }
+                    AppLog.d("MappleProbe", "no probe source verified natively — falling back to the page's own captures")
+                }
+            }
+
+            onStatus(id, "Verifying ${candidates.size} stream candidate(s)…")
             val verified = StreamVerifier.pickBest(candidates, headers, id.label)
             if (verified == null) {
                 attempts.add(Attempt(id, "Found ${candidates.size} candidate(s) but none playable (expired/blocked)"))

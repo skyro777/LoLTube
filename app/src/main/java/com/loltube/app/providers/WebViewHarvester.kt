@@ -23,6 +23,7 @@ import com.loltube.app.util.AppLog
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.builtins.ListSerializer
@@ -48,6 +49,19 @@ data class SiteSubtitle(
     val url: String,
     val body: String,
     val coupled: Boolean,
+)
+
+/** One of Mapple's 13 internal sources, probed DIRECTLY through the page's own
+ *  session (the injected JS resolves every source's master playlist — POST
+ *  /api/encrypt per source -> GET the encrypted URL -> fetch the master ->
+ *  parse RESOLUTION) while the page's own rotation runs. This is the "control
+ *  over mapple's sources" engine: the app sees every source's real ladder in
+ *  seconds and plays the best one instead of whatever the rotation lands on.
+ *  height -1 = offline/failed, 0 = mp4 (no ladder to parse). */
+data class MappleSourceProbe(
+    val source: String,
+    val height: Int,
+    val url: String,
 )
 
 private fun parseListingTracks(body: String): List<Wyzie.Sub> {
@@ -105,11 +119,13 @@ private fun parseListingTracks(body: String): List<Wyzie.Sub> {
 }
 
 /** Result of one harvest run: playable stream candidates + subtitle listing +
- *  the site-synced subtitle bodies captured off the page's own downloads. */
+ *  the site-synced subtitle bodies captured off the page's own downloads +
+ *  mapple's per-source quality table from the direct probe. */
 data class HarvestResult(
     val candidates: List<StreamCandidate>,
     val subs: List<Wyzie.Sub>,
     val siteSubs: List<SiteSubtitle> = emptyList(),
+    val mappleSources: List<MappleSourceProbe> = emptyList(),
 )
 
 @SuppressLint("SetJavaScriptEnabled", "JavascriptInterface")
@@ -117,12 +133,22 @@ class WebViewHarvester(private val context: Context) {
 
     private val candidates = CopyOnWriteArrayList<StreamCandidate>()
     private val siteSubs = CopyOnWriteArrayList<SiteSubtitle>()
+    private val mappleSources = CopyOnWriteArrayList<MappleSourceProbe>()
     @Volatile private var lastActivityMs: Long = 0
     @Volatile private var sawFragment = false
     @Volatile private var sawPlaying = false
     @Volatile private var webViewRef: WebView? = null
     @Volatile private var pageHost: String = ""
     @Volatile private var capturedSubs: List<Wyzie.Sub> = emptyList()
+    @Volatile private var mappleProbeDone = false
+    @Volatile private var prefSubLang: String = "en"
+    @Volatile private var subFetchJob: kotlinx.coroutines.Job? = null
+
+    /** IO scope for the immediate subtitle download (launched from the WebView
+     *  binder thread when a listing lands — must never block the page). */
+    private val ioScope = kotlinx.coroutines.CoroutineScope(
+        kotlinx.coroutines.SupervisorJob() + Dispatchers.IO,
+    )
 
     private val bridge = object {
         @JavascriptInterface
@@ -188,8 +214,86 @@ class WebViewHarvester(private val context: Context) {
             capturedSubs = tracks
             lastActivityMs = now()
             AppLog.d("Harvest", "captured ${tracks.size} subtitle track(s) from player listing <- ${url.take(80)}")
+            onListingCaptured(tracks, "page listing")
+        }
+
+        /** DIRECT SOURCE CONTROL — one of mapple's 13 internal sources,
+         *  resolved by the injected probe. height -1 = offline, 0 = mp4. */
+        @JavascriptInterface
+        fun onMappleSource(source: String, height: String, url: String) {
+            val h = height.toIntOrNull() ?: -1
+            if (mappleSources.any { it.source == source }) return
+            mappleSources.add(MappleSourceProbe(source, h, url))
+            if (h >= 0 && url.isNotBlank()) {
+                lastActivityMs = now()
+                AppLog.d(
+                    "MappleProbe",
+                    "source $source -> ${if (h > 0) "${h}p" else "mp4"}${if (h >= 2000) " (4K!)" else ""}",
+                )
+            } else {
+                AppLog.d("MappleProbe", "source $source offline/failed")
+            }
+        }
+
+        /** The probe walked all 13 sources (or as many as answered). */
+        @JavascriptInterface
+        fun onMappleProbeDone(count: String) {
+            mappleProbeDone = true
+            lastActivityMs = now()
+            AppLog.d("MappleProbe", "probe complete — $count source(s) answered")
         }
     }
+
+    /** A subtitle listing just landed (wyzie proxy or the page's own action).
+     *  The token URLs it carries are minted per-listing and ROTATE — the
+     *  exact token from a user's failure log was dead 75 s after capture
+     *  while a fresh listing's token for the same track answered 200 — so the
+     *  site's pick is downloaded RIGHT NOW, while the token is seconds old.
+     *  The body lands in [siteSubs] and ships with the stream. */
+    private fun onListingCaptured(tracks: List<Wyzie.Sub>, via: String) {
+        if (tracks.isEmpty()) return
+        val pick = Wyzie.pickSiteTrack(tracks, prefSubLang) ?: return
+        if (subFetchJob?.isActive == true) return
+        AppLog.d("Subs", "listing captured ($via) — immediately downloading \"${pick.display}\" (fresh token)")
+        subFetchJob = ioScope.launch {
+            val dl = runCatching { Wyzie.download(pick) }.getOrNull()
+            val body = dl?.let { runCatching { it.first.readText() }.getOrNull() }
+            if (body != null && siteSubs.none { it.url == pick.url }) {
+                siteSubs.add(SiteSubtitle(pick.url, body, coupled = true))
+                AppLog.d(
+                    "Subs",
+                    "IMMEDIATE subtitle downloaded: ${body.length}b \"${pick.display}\" (fresh-token, site's own pick)",
+                )
+            } else {
+                AppLog.d("Subs", "immediate download failed for \"${pick.display}\" — the in-page fetch and fresh-refetch layers still cover it")
+            }
+        }
+    }
+
+    /** Ask the PAGE ITSELF to fetch the subtitle track (for listings the app
+     *  proxied and re-served — the page's own JS never sees them). The
+     *  download then runs with the page's origin, cookies and user-agent —
+     *  identical to the site's own player fetching its auto-armed track. */
+    private fun fetchTrackInPage(view: WebView?, pickUrl: String) {
+        val v = view ?: return
+        val js = """
+            (function(){
+              try {
+                var u = "${jsEscape(pickUrl)}";
+                fetch(u).then(function(r){ return r.ok ? r.text() : null; }).then(function(t){
+                  if (t && t.length > 150 &&
+                      (t.split('-->').length >= 3 || t.indexOf('[Script Info]') === 0 || /^Dialogue:/m.test(t))) {
+                    try { __loltube.onSiteSubtitle(u, t); } catch(e) {}
+                  }
+                }).catch(function(){});
+              } catch(e) {}
+            })();
+        """.trimIndent()
+        v.post { runCatching { v.evaluateJavascript(js, null) } }
+    }
+
+    private fun jsEscape(s: String): String =
+        s.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n").replace("\r", "\\r")
 
     /**
      * Loads [url] and waits until a video manifest is very likely captured.
@@ -199,13 +303,14 @@ class WebViewHarvester(private val context: Context) {
      * [prefSubLang] seeds the page's stored language so the site auto-selects
      * (and downloads) the track it would pair with THIS stream copy.
      *
-     * Mapple wait profile: mapple embeds run a client-side source ROTATION
-     * engine (13 sources; per-source timeouts 5–25 s; worst-case exhaustion
-     * ≈ 2 minutes) and the only trustworthy "a source works" signal is the
-     * page's video actually PLAYING — a captured manifest alone can be a
-     * dead source the page has already rotated away from. So for mapple the
-     * harvest [requirePlaying] and waits far longer (up to 150 s for series)
-     * instead of the 45 s that used to give up mid-rotation.
+     * Mapple wait profile: the DIRECT source probe (injected JS that piggybacks
+     * the page's own session and resolves every source's master playlist) is
+     * the primary signal — a probed 4K source or a complete live table
+     * resolves the harvest in ~10–30 s without waiting for playback. The
+     * page's own rotation still backs it up: mapple embeds rotate up to 13
+     * sources (per-source timeouts 5–25 s; worst-case ≈ 2 minutes), so the
+     * harvest window stays wide (150 s series / 75 s movies) and a page that
+     * actually reaches PLAYING also qualifies.
      */
     suspend fun harvest(
         url: String,
@@ -217,10 +322,15 @@ class WebViewHarvester(private val context: Context) {
     ): HarvestResult {
         candidates.clear()
         siteSubs.clear()
+        mappleSources.clear()
         sawFragment = false
         sawPlaying = false
         lastActivityMs = 0
         capturedSubs = emptyList()
+        mappleProbeDone = false
+        this.prefSubLang = prefSubLang
+        try { subFetchJob?.cancel() } catch (t: Throwable) {}
+        subFetchJob = null
         pageHost = android.net.Uri.parse(url).host ?: ""
 
         return withContext(Dispatchers.Main) {
@@ -241,11 +351,16 @@ class WebViewHarvester(private val context: Context) {
                         val quietMs = if (lastActivityMs == 0L) 0 else t - lastActivityMs
                         val grew = candidates.size > lastCandidateCount
                         if (grew) lastCandidateCount = candidates.size
-                        // mapple: only PLAYING proves a live source (the rotation
-                        // engine keeps trying otherwise); vidfast/vidcore: any
-                        // manifest + traffic is decisive.
+                        // mapple: the DIRECT source probe is decisive — a probed
+                        // 4K source (or a complete probe table with a live
+                        // source) resolves without waiting for the page's
+                        // rotation to actually hit play; playing or
+                        // manifest+grace still qualify (the rotation landed).
+                        // vidfast/vidcore: any manifest + traffic is decisive.
+                        val probe4k = mappleSources.any { it.height >= 2000 && it.url.isNotBlank() }
+                        val probeDoneLive = mappleProbeDone && mappleSources.any { it.url.isNotBlank() }
                         val earlyExit = if (requirePlaying) {
-                            sawPlaying || (hasManifest && quietMs > manifestGraceMs)
+                            probe4k || probeDoneLive || sawPlaying || (hasManifest && quietMs > manifestGraceMs)
                         } else {
                             hasManifest && (sawFragment || sawPlaying || quietMs > manifestGraceMs)
                         }
@@ -267,11 +382,17 @@ class WebViewHarvester(private val context: Context) {
                     ensureActive()
                     delay(250)
                 }
-                HarvestResult(candidates.toList(), capturedSubs, siteSubs.toList())
+                // the immediate subtitle download (launched the moment the
+                // listing landed) gets a short bounded join so its body ships
+                // with the result — but it must never hold the harvest hostage
+                try {
+                    kotlinx.coroutines.withTimeoutOrNull(2_500) { subFetchJob?.join() }
+                } catch (t: Throwable) { /* never block on the subtitle */ }
+                HarvestResult(candidates.toList(), capturedSubs, siteSubs.toList(), mappleSources.toList())
             } catch (t: Throwable) {
                 if (t is kotlinx.coroutines.CancellationException) throw t
                 AppLog.e("Harvest", "failed: ${t.message}")
-                HarvestResult(candidates.toList(), capturedSubs, siteSubs.toList())
+                HarvestResult(candidates.toList(), capturedSubs, siteSubs.toList(), mappleSources.toList())
             } finally {
                 destroyWebView()
             }
@@ -335,18 +456,35 @@ class WebViewHarvester(private val context: Context) {
                     Net.client.newCall(req).execute().use { resp ->
                         if (!resp.isSuccessful) return null
                         val body = resp.body?.string() ?: return null
+                        var parsed: List<Wyzie.Sub> = emptyList()
                         runCatching {
-                            val subs = Net.json.decodeFromString(
+                            parsed = Net.json.decodeFromString(
                                 ListSerializer(Wyzie.Sub.serializer()), body,
                             ).filter { it.url.isNotBlank() }
-                            if (subs.isNotEmpty()) {
-                                capturedSubs = subs
-                                AppLog.d("Harvest", "captured ${subs.size} subtitle track(s) from page")
+                            if (parsed.isNotEmpty()) {
+                                capturedSubs = parsed
+                                AppLog.d("Harvest", "captured ${parsed.size} subtitle track(s) from page")
                             }
                         }
                         WebResourceResponse(
                             "application/json", "utf-8", ByteArrayInputStream(body.toByteArray()),
-                        )
+                        ).also {
+                            // The listing was just re-served to the page — the
+                            // token URLs are at their FRESHEST right now. Two
+                            // immediate layers kick in:
+                            //  1. app-side download of the site's own pick
+                            //     (fresh token, plain HTTP — verified live)
+                            //  2. the PAGE downloads the same track for us with
+                            //     its own origin/cookies/UA (the exact context
+                            //     the site's player uses) and the bridge hands
+                            //     the body straight to the app.
+                            if (parsed.isNotEmpty()) {
+                                onListingCaptured(parsed, "wyzie proxy")
+                                Wyzie.pickSiteTrack(parsed, prefSubLang)?.let { pick ->
+                                    fetchTrackInPage(view, pick.url)
+                                }
+                            }
+                        }
                     }
                 } catch (t: Throwable) {
                     AppLog.d("Harvest", "wyzie proxy failed: ${t.message?.take(60)}")
@@ -479,6 +617,122 @@ class WebViewHarvester(private val context: Context) {
               } catch(e) {}
               if (window.__loltube_hooked) return;
               window.__loltube_hooked = true;
+              // ===== MAPPLE DIRECT SOURCE CONTROL (the 13 sources) =====
+              // Mapple's own player rotates its sources "first online wins".
+              // This probe takes DIRECT control instead: it piggybacks the
+              // page's own session (captured from its /api/ui/session +
+              // /api/media-session responses), then resolves EVERY source's
+              // encrypted stream itself (POST /api/encrypt per source ->
+              // GET the encrypted URL -> fetch the master -> parse RESOLUTION)
+              // and reports the full quality table to the app, which then
+              // plays the BEST source instead of whatever the rotation found.
+              var __mp = { requestToken: null, streamToken: null, mediaId: null, mediaType: 'movie', tv_slug: '', started: false, ownTried: false, bootTries: 0 };
+              try {
+                var __seg = location.pathname.split('/').filter(Boolean);
+                var __last = __seg.length ? __seg[__seg.length - 1] : '';
+                var __mtv = __last.match(/^(\d+)-(\d+)-(\d+)$/);
+                var __mmv = __last.match(/^(\d+)$/);
+                if (__mtv) { __mp.mediaId = parseInt(__mtv[1], 10); __mp.mediaType = 'tv'; __mp.tv_slug = __mtv[2] + '-' + __mtv[3]; }
+                else if (__mmv) { __mp.mediaId = parseInt(__mmv[1], 10); __mp.mediaType = 'movie'; __mp.tv_slug = ''; }
+              } catch(e) {}
+              function __mpReport(s, h, url) {
+                try { __loltube.onMappleSource(s, String(h), url || ''); } catch(e) {}
+              }
+              function __mpStart() {
+                if (__mp.started) return;
+                if (!__mp.requestToken || !__mp.streamToken || __mp.mediaId == null) return;
+                __mp.started = true;
+                var SOURCES = ["s25","mapple","s2","s28","s19","s16","s10","s27","s4","s12","s6","s7","s8"];
+                var CONC = 3;
+                function probeOne(s) {
+                  return fetch('/api/encrypt', {
+                    method: 'POST', credentials: 'same-origin',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ data: { mediaId: __mp.mediaId, mediaType: __mp.mediaType, tv_slug: __mp.tv_slug, source: s }, endpoint: 'stream-encrypted', requestToken: __mp.requestToken })
+                  }).then(function(r){ return r.ok ? r.json() : null; }).then(function(enc){
+                    if (!enc || !enc.url) { __mpReport(s, -1, ''); return null; }
+                    var u2 = enc.url + (enc.url.indexOf('?') >= 0 ? '&' : '?') +
+                             'requestToken=' + encodeURIComponent(__mp.requestToken) +
+                             '&token=' + encodeURIComponent(__mp.streamToken);
+                    return fetch(u2, { credentials: 'include' }).then(function(r){ return r.ok ? r.json() : null; });
+                  }).then(function(sr){
+                    if (!sr || !sr.success || !sr.data || !sr.data.stream_url) { __mpReport(s, -1, ''); return null; }
+                    var su = sr.data.stream_url;
+                    if ((sr.data.format || '').toLowerCase() === 'mp4' || /\.mp4($|\?)/i.test(su)) { __mpReport(s, 0, su); return null; }
+                    return fetch(su).then(function(r){ return r.ok ? r.text() : null; }).then(function(txt){
+                      var h = 0;
+                      if (txt) { var re = /RESOLUTION=(\d+)x(\d+)/g, mm; while ((mm = re.exec(txt))) { h = Math.max(h, parseInt(mm[2], 10)); } }
+                      __mpReport(s, txt ? h : -1, txt ? su : '');
+                    });
+                  }).catch(function(){ __mpReport(s, -1, ''); });
+                }
+                var idx = 0, active = 0, done = 0;
+                function next() {
+                  if (idx >= SOURCES.length && active === 0) {
+                    try { __loltube.onMappleProbeDone(String(done)); } catch(e) {}
+                    return;
+                  }
+                  while (idx < SOURCES.length && active < CONC) {
+                    (function(s){
+                      active++;
+                      probeOne(s).then(function(){ active--; done++; next(); }, function(){ active--; done++; next(); });
+                    })(SOURCES[idx++]);
+                  }
+                }
+                next();
+              }
+              function __mpSolvePow(pow) {
+                return new Promise(function(res){
+                  var settled = false;
+                  function fin(v){ if (!settled) { settled = true; res(v); } }
+                  try {
+                    var w = new Worker('/pow-worker.js');
+                    var to = setTimeout(function(){ try { w.terminate(); } catch(e1) {} fin(null); }, 9000);
+                    w.onmessage = function(e){ clearTimeout(to); try { w.terminate(); } catch(e2) {} var d = e && e.data; fin(d && d.found ? d.nonce : null); };
+                    w.onerror = function(){ clearTimeout(to); try { w.terminate(); } catch(e3) {} fin(null); };
+                    w.postMessage({ challenge: pow.challenge, difficulty: pow.difficulty });
+                  } catch(e) { fin(null); }
+                });
+              }
+              // bootstrap watcher: the page seeds __REQUEST_TOKEN_BOOTSTRAP__
+              // itself; if its own media-session call wasn't visible, make our
+              // own (with the PoW worker) after ~20 s.
+              if (location.hostname.indexOf('mapple') >= 0) {
+                var __mpTimer = setInterval(function(){
+                  try {
+                    if (__mp.started) { clearInterval(__mpTimer); return; }
+                    if (!__mp.requestToken && window.__REQUEST_TOKEN_BOOTSTRAP__ && window.__REQUEST_TOKEN_BOOTSTRAP__.then) {
+                      window.__REQUEST_TOKEN_BOOTSTRAP__.then(function(s){
+                        if (s && s.token && !__mp.requestToken) { __mp.requestToken = s.token; __mpStart(); }
+                      }).catch(function(){});
+                    }
+                    if (!__mp.streamToken && __mp.requestToken && __mp.mediaId != null && !__mp.ownTried && __mp.bootTries > 13) {
+                      __mp.ownTried = true;
+                      fetch('/api/media-session', {
+                        method: 'POST', credentials: 'same-origin',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ mediaId: __mp.mediaId, mediaType: __mp.mediaType, tv_slug: __mp.tv_slug, requestToken: __mp.requestToken })
+                      }).then(function(r){ return r.ok ? r.json() : null; }).then(function(st){
+                        if (st && st.token) { __mp.streamToken = st.token; __mpStart(); return; }
+                        if (st && st.requiresPow && st.pow) {
+                          __mpSolvePow(st.pow).then(function(nonce){
+                            if (nonce == null) return;
+                            fetch('/api/media-session', {
+                              method: 'POST', credentials: 'same-origin',
+                              headers: { 'Content-Type': 'application/json' },
+                              body: JSON.stringify({ mediaId: __mp.mediaId, mediaType: __mp.mediaType, tv_slug: __mp.tv_slug, requestToken: __mp.requestToken, pow: { challengeId: st.pow.challengeId, nonce: nonce } })
+                            }).then(function(r){ return r.ok ? r.json() : null; }).then(function(st2){
+                              if (st2 && st2.token) { __mp.streamToken = st2.token; __mpStart(); }
+                            }).catch(function(){});
+                          });
+                        }
+                      }).catch(function(){});
+                    }
+                    __mpStart();
+                  } catch(e) {}
+                  if (++__mp.bootTries > 120) clearInterval(__mpTimer);
+                }, 1500);
+              }
               function send(url, kind){
                 try { __loltube.onCandidate(url, kind); } catch(e) {}
               }
@@ -529,6 +783,27 @@ class WebViewHarvester(private val context: Context) {
                   var k = classify(u); if (k) send(u, k);
                   var pr = ff.apply(this, arguments);
                   try {
+                    // piggyback the page's own session tokens for the mapple
+                    // source probe (request body of media-session also carries
+                    // mediaId/mediaType/tv_slug — the ground truth params)
+                    if (__mp && /^https?:/i.test(u) &&
+                        (u.indexOf('/api/media-session') >= 0 || u.indexOf('/api/ui/session') >= 0)) {
+                      if (u.indexOf('/api/media-session') >= 0) {
+                        try {
+                          var ib = (init && typeof init.body === 'string') ? init.body : '';
+                          if (ib) { var pj = JSON.parse(ib); if (pj) { if (pj.mediaId != null) __mp.mediaId = pj.mediaId; if (pj.mediaType) __mp.mediaType = pj.mediaType; if (pj.tv_slug != null) __mp.tv_slug = pj.tv_slug; } }
+                        } catch(e1) {}
+                      }
+                      pr.then(function(r){
+                        try {
+                          r.clone().text().then(function(t){
+                            try { var sj = JSON.parse(t); if (sj && sj.token) { if (u.indexOf('/api/media-session') >= 0) __mp.streamToken = sj.token; else __mp.requestToken = sj.token; __mpStart(); } } catch(e2) {}
+                          }).catch(function(){});
+                        } catch(e3) {}
+                      }).catch(function(){});
+                    }
+                  } catch(e0) {}
+                  try {
                     if (u && /^https?:/i.test(u) && classify(u) === null && u.indexOf('/wyzie?') === -1) {
                       pr.then(function(resp){
                         try {
@@ -564,6 +839,38 @@ class WebViewHarvester(private val context: Context) {
                                     (t.indexOf('"lang"') > 0 || t.indexOf('"language"') > 0 ||
                                      t.indexOf('"label"') > 0 || t.indexOf('"display"') > 0)) {
                                   __loltube.onSiteSubListing(u, t);
+                                  // AND download the preferred track right here IN
+                                  // the page — the page's own origin/cookies/UA
+                                  // (the exact context the site's player uses)
+                                  // and the freshest possible token. This is the
+                                  // series-subtitle fix for listings the app
+                                  // only SEES (mapple's server action): no
+                                  // dependency on the page's own auto-arm
+                                  // timing or a later app-side download.
+                                  try {
+                                    var arr = [];
+                                    try { arr = JSON.parse(t); } catch(pe) {}
+                                    if (!arr || !arr.length) { var po = t.indexOf('['); if (po >= 0) { try { arr = JSON.parse(t.slice(po)); } catch(pe2) {} } }
+                                    if (arr && arr.length) {
+                                      var prefL = ('__LANG__').toLowerCase();
+                                      function isPrefTrack(x){
+                                        var l = String(x.lang || x.language || '').toLowerCase();
+                                        var d = String(x.label || x.display || '').toLowerCase();
+                                        return l === prefL || l.indexOf(prefL) === 0 || d.indexOf(prefL) === 0 ||
+                                               (prefL === 'en' && (l === 'english' || d.indexOf('english') === 0));
+                                      }
+                                      var pk = null;
+                                      for (var ai = 0; ai < arr.length; ai++) { var a1 = arr[ai]; if (a1 && a1.url && isPrefTrack(a1)) { pk = a1; break; } }
+                                      if (!pk) { for (var aj = 0; aj < arr.length; aj++) { var a2 = arr[aj]; if (a2 && a2.url) { var l2 = String(a2.lang || a2.language || '').toLowerCase(); var d2 = String(a2.label || a2.display || '').toLowerCase(); if (l2 === 'en' || d2.indexOf('english') === 0) { pk = a2; break; } } } }
+                                      if (pk && pk.url) {
+                                        fetch(pk.url).then(function(r){ return r.ok ? r.text() : null; }).then(function(st){
+                                          if (st && st.length > 150 && (st.split('-->').length >= 3 || st.indexOf('[Script Info]') === 0 || /^Dialogue:/m.test(st))) {
+                                            try { __loltube.onSiteSubtitle(pk.url, st); } catch(se) {}
+                                          }
+                                        }).catch(function(){});
+                                      }
+                                    }
+                                  } catch(le) {}
                                 }
                               } catch(e3) {}
                             }).catch(function(){});

@@ -131,7 +131,12 @@ object Cinemeta {
             Net.json.decodeFromString(CatalogResponse.serializer(), body).metas
                 .filter { it.id.startsWith("tt") }
                 .map { it.toEntry(type) }
-        }.onFailure { AppLog.e("Cinemeta", "catalog $catalogId/$type failed: ${it.message}") }
+        }.onFailure {
+            // cancelled searches (user kept typing) are not errors — the old
+            // log noise ("StandaloneCoroutine was cancelled") hid real failures
+            if (it is kotlinx.coroutines.CancellationException) throw it
+            AppLog.e("Cinemeta", "catalog $catalogId/$type failed: ${it.message}")
+        }
             .getOrDefault(emptyList())
     }
 
@@ -165,7 +170,10 @@ object Cinemeta {
                 .distinctBy { it.imdbId }
                 .sortedByDescending { it.imdbRating?.toDoubleOrNull() ?: 0.0 }
                 .take(40)
-        }.onFailure { AppLog.e("Cinemeta", "search '$q' failed: ${it.message}") }
+        }.onFailure {
+            if (it is kotlinx.coroutines.CancellationException) throw it
+            AppLog.e("Cinemeta", "search '$q' failed: ${it.message}")
+        }
             .getOrDefault(emptyList())
     }
 
@@ -176,7 +184,10 @@ object Cinemeta {
                 Net.json.decodeFromString(CatalogResponse.serializer(), body).metas
                     .filter { it.id.startsWith("tt") }
                     .map { it.toEntry(fallbackType) }
-            }.onFailure { AppLog.e("Cinemeta", "fetch failed: ${it.message}") }
+            }.onFailure {
+                if (it is kotlinx.coroutines.CancellationException) throw it
+                AppLog.e("Cinemeta", "fetch failed: ${it.message}")
+            }
                 .getOrDefault(emptyList())
         }
 
@@ -185,7 +196,10 @@ object Cinemeta {
         runCatching {
             val body = Net.get("$BASE/meta/$type/$imdbId.json")
             Net.json.decodeFromString(MetaResponse.serializer(), body).meta?.toDetails(type)
-        }.onFailure { AppLog.e("Cinemeta", "meta failed for $imdbId: ${it.message}") }
+        }.onFailure {
+            if (it is kotlinx.coroutines.CancellationException) throw it
+            AppLog.e("Cinemeta", "meta failed for $imdbId: ${it.message}")
+        }
             .getOrNull()
     }
 

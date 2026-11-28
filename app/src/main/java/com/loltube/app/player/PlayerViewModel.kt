@@ -694,7 +694,12 @@ class PlayerViewModel(
 
         val siteNative = providerSubs.isNotEmpty()
         val pool = providerSubs.ifEmpty { _subs.value }
-        if (pool.isEmpty()) return // nothing to pick from yet; a later listing can still attach
+        if (pool.isEmpty()) {
+            // nothing captured at all — the fresh-listing path mints its own
+            // listing (and fresh tokens) right now
+            freshListingFallback()
+            return
+        }
 
         val pref = (desiredSubLang ?: settings.preferredSubtitleLang).lowercase()
         // THE SITE'S OWN SELECTION ALGORITHM (vidfast/vidcore, from their
@@ -725,11 +730,54 @@ class PlayerViewModel(
             s.language?.lowercase() == "en" || s.display.contains("english", true)
         }
         val ordered = (langMatches + englishFallback).distinctBy { it.url }
-        if (ordered.isEmpty()) return
+        if (ordered.isEmpty()) {
+            // the captured listing has no track for our language — a FRESH
+            // listing is the only remaining shot (it also mints fresh tokens)
+            freshListingFallback()
+            return
+        }
         for (pick in ordered.take(3)) {
             if (attachSubtitleCues(pick, siteNative = siteNative)) return
             AppLog.d("Subs", "track \"${pick.display}\" unavailable — trying the next one")
         }
+
+        // FRESH-LISTING FALLBACK: every layer above failed — and the tokens the
+        // captured listing carried can be stale by now (they ROTATE server-side;
+        // the exact token from a user's failure log was dead 75 s after capture
+        // while a fresh listing's token for the SAME track answered 200). A
+        // re-fetch right here mints brand-new tokens and the download rides the
+        // same request — verified live to work for every track of a series.
+        freshListingFallback()
+    }
+
+    /** Re-fetch the wyzie listing NOW (brand-new tokens — they rotate
+     *  server-side) and immediately download the site's own pick. The last
+     *  layer of the subtitle pipeline; also the first resort when nothing at
+     *  all was captured. Arms with sync=0 (a fresh listing is the site's own
+     *  track list for THIS episode). */
+    private suspend fun freshListingFallback() {
+        if (sidecarCues.isNotEmpty()) return
+        if (userTurnedSubsOff) return
+        val req = currentRequest ?: return
+        val pref2 = (desiredSubLang ?: settings.preferredSubtitleLang).lowercase()
+        val fresh = kotlinx.coroutines.withTimeoutOrNull(9_000) {
+            Wyzie.freshBestSub(req.imdbId, req.season, req.episode, pref2)
+        }
+        if (fresh != null) {
+            val (sub, body, _) = fresh
+            val cues = runCatching { Subtitles.parse(body) }.getOrDefault(emptyList())
+            if (cues.isNotEmpty()) {
+                sidecarSub = sub
+                sidecarCues = cues
+                desiredSubLang = sub.language ?: sub.display
+                userTurnedSubsOff = false
+                _activeSubLabel.value = sub.display
+                _subDelayMs.value = 0
+                AppLog.d("Subs", "FRESH-LISTING subtitle \"${sub.display}\" armed: ${cues.size} cues, sync=0ms")
+                return
+            }
+        }
+        AppLog.d("Subs", "fresh-listing subtitle unavailable too — menu selection stays available")
     }
 
     /**
@@ -950,7 +998,7 @@ class PlayerViewModel(
                         mergeSubs(wyzieSubs)
                         AppLog.d("Subs", "site listing empty — subtitle-API fallback: ${wyzieSubs.size} track(s)")
                         if (sidecarCues.isEmpty() && !userTurnedSubsOff) {
-                            kotlinx.coroutines.withTimeoutOrNull(4_000) { preAttachSubtitle() }
+                            kotlinx.coroutines.withTimeoutOrNull(10_000) { preAttachSubtitle() }
                         }
                     }
                 }
@@ -1020,7 +1068,7 @@ class PlayerViewModel(
             }
             _subDelayMs.value = settings.subDelayByProvider[stream.provider] ?: 0
             if (sidecarCues.isEmpty()) {
-                kotlinx.coroutines.withTimeoutOrNull(4_000) { preAttachSubtitle() }
+                kotlinx.coroutines.withTimeoutOrNull(10_000) { preAttachSubtitle() }
             }
 
             val existing = if (reusePlayer) player.value else null

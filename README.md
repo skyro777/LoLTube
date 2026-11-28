@@ -13,6 +13,19 @@ Grab the APK from the [**Latest Build** release](../../releases/tag/latest):
 
 Every push to `main` rebuilds it automatically (GitHub Actions).
 
+## What's new in v0.12.0 — subtitles that actually arrive, mapple under direct control
+
+v0.11 fixed the switching and the waiting. The user's new subtitle-failure log pointed at one precise thing — and a live experiment on the exact URLs from that log proved it:
+
+- **Series subtitles: the token was stale.** The app captured the `/wyzie` listing during the harvest and downloaded the track at attach time — **75 s later**. Re-testing the exact token URL from the failure log returned **404**, while a **fresh** listing's token for the same track returned **200** with a valid ASS file: those token URLs **rotate server-side**. The fix is three layers, each immune to the staleness:
+  1. **Immediate download** — the moment a listing lands (the wyzie proxy or mapple's server action), the site's own pick (UTF-8-first / non-HI / your-language, the sites' algorithm) is downloaded **while the token is seconds old** and ships with the stream as a site-synced body.
+  2. **In-page fetch** — the harvester also asks the *page itself* to fetch that track (the page's own origin/cookies/UA — the exact context the site's player uses) and hands the body straight to the app. For mapple's server-action listings this runs *inside* the page, before playback even starts.
+  3. **Fresh-listing fallback** — if both miss, the attach path **re-fetches the listing right then** (brand-new tokens) and downloads on the same breath. 4→10 s budget, and the failure log now prints the **HTTP status** (404 expired / 403 challenged / 429 rate-limited — no more guessing).
+- **Mapple's 13 sources are now under DIRECT control** (the "check them all, fast" ask). Instead of seeding a localStorage order and waiting for mapple's first-online-wins rotation (60–150 s), the harvester injects a probe into the page that **piggybacks the page's own session tokens** and resolves **every source itself** — `POST /api/encrypt` per source → fetch the master playlist → parse the RESOLUTION ladder — three sources in parallel, 4K-flagged first (s25, mapple, s2, s28, s19, s16, s10, then the rest). The harvest exits as soon as a **4K source is verified** (~10–30 s typical) or the full table lands; the resolver then natively verifies the best source's manifest and **plays the winner** — not whatever the rotation happened to find. Offline sources are reported per-name in the log (`[MappleProbe] source s27 offline/failed`). The probe also solves mapple's Proof-of-Work challenge via the page's own `pow-worker.js` when needed, and everything degrades gracefully to the old rotation-wait if mapple rotates its API shape.
+- **Poster load speed.** The catalog poster CDN ships no usable cache headers and Coil's default disk cache respected them — every cold start re-downloaded ~120 posters. The app now ships a custom image loader that caches posters on disk regardless of the headers (second launch renders home instantly), with a bigger memory share for focus-scrolling and a subtle crossfade.
+- Cinemeta search cancellation noise is gone from the logs (cancelled searches were logged as errors while you typed).
+- The buffer engine, playback pipeline, and everything that made 4K movies play without buffering remain untouched.
+
 ## What's new in v0.11.0 — the series rescue
 
 Movies were playing 4K buffer-free, but series were a different animal. The fresh logs (log.txt + subtitlenotloadlog.txt) plus live probing of all three sites pinned three root causes — none of them in the buffer engine (untouched, as ordered):
