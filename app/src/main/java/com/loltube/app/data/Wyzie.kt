@@ -111,7 +111,7 @@ object Wyzie {
             body.trimStart().startsWith("WEBVTT", ignoreCase = true) -> "text/vtt"
             else -> "application/x-subrip"
         }
-        AppLog.d("Wyzie", "fresh-listing subtitle "${pick.display}" downloaded (${body.length} chars, $mime)")
+        AppLog.d("Wyzie", "fresh-listing subtitle \"${pick.display}\" downloaded (${body.length} chars, $mime)")
         Triple(pick, body, mime)
     }
 
